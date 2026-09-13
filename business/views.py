@@ -13,12 +13,13 @@ from django.db import transaction, IntegrityError
 
 logger = logging.getLogger(__name__)
 
-from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute
+from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute, Branch
 from business.serializers import BusinessCategorySerializer, CurrencySerializer, CitySerializer, CountrySerializer, \
     BusinessProfileWriteSerializer, BusinessProfileListSerializer, BusinessProfileDetailSerializer, SocialMediaLinkSerializer, \
     SocialMediaLinksReplaceSerializer, SocialMediaLinksReplaceResponseSerializer, BusinessProfileHomePageSerializer, \
     BusinessProfileUpdateSerializer, BusinessProfileUpdateResponseSerializer, BranchAttributeSerializer, \
-    BusinessProfileImageSerializer
+    BusinessProfileImageSerializer, BranchLocationSerializer, BranchLocationsReplaceSerializer, \
+    BranchLocationsReplaceResponseSerializer
 from rest_framework.permissions import AllowAny
 from utils.permissions import IsBusinessOrSuperAdmin
 from .models import BusinessProfile
@@ -226,6 +227,80 @@ class SocialMediaLinkBulkUpdateView(APIView):
         response_serializer = SocialMediaLinkSerializer(created_links, many=True)
         return Response(
             {"social_links": response_serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+
+@extend_schema(
+    tags=['Business'],
+    summary="Replace a business's locations (Ubicaciones)",
+    description="""
+    Full-replacement endpoint for a business's named addresses/locations.
+
+    Entries with an `id` update that existing location in place (preserving
+    any attributes already attached to it); entries without an `id` are
+    created; existing locations whose `id` is omitted from the payload are
+    deleted. The first location in the submitted list is marked as the
+    business's headquarter branch (used elsewhere for the "Atributos" row).
+    """,
+    request=BranchLocationsReplaceSerializer,
+    responses={200: BranchLocationsReplaceResponseSerializer},
+)
+class BranchLocationsBulkUpdateView(APIView):
+    """
+    Full-replacement endpoint for a business's locations/addresses.
+    """
+    permission_classes = [IsBusinessOrSuperAdmin]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            business_profile = request.user.business_profile
+        except BusinessProfile.DoesNotExist:
+            return Response(
+                {"error": "No business profile found for this user."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = BranchLocationsReplaceSerializer(
+            data=request.data, context={"business": business_profile}
+        )
+        serializer.is_valid(raise_exception=True)
+        locations = serializer.validated_data['locations']
+
+        try:
+            with transaction.atomic():
+                submitted_ids = {entry['id'] for entry in locations if entry.get('id')}
+                business_profile.branches.exclude(id__in=submitted_ids).delete()
+
+                result_branches = []
+                for index, entry in enumerate(locations):
+                    is_headquarter = index == 0
+                    if entry.get('id'):
+                        branch = business_profile.branches.get(id=entry['id'])
+                        branch.name = entry['name']
+                        branch.address = entry['address']
+                        branch.is_headquarter = is_headquarter
+                        branch.save()
+                    else:
+                        branch = Branch.objects.create(
+                            business=business_profile,
+                            name=entry['name'],
+                            address=entry['address'],
+                            is_headquarter=is_headquarter,
+                        )
+                    result_branches.append(branch)
+        except IntegrityError:
+            logger.exception(
+                "Integrity error replacing locations for user %s", request.user.id
+            )
+            return Response(
+                {"error": "Ha ocurrido un error inesperado."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        response_serializer = BranchLocationSerializer(result_branches, many=True)
+        return Response(
+            {"locations": response_serializer.data},
             status=status.HTTP_200_OK,
         )
 

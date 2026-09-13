@@ -2,7 +2,7 @@ import re
 
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
-from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute
+from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute, Branch
 from .validators import validate_image_size, validate_image_extension
 from cities_light.models import City, Country
 from django.contrib.auth import get_user_model
@@ -188,6 +188,76 @@ class BranchAttributeSerializer(serializers.ModelSerializer):
         fields = ['id', 'name']
 
 
+class BranchLocationSerializer(serializers.ModelSerializer):
+    """
+    Read-only view of a Branch as a simple named address, for the
+    "Ubicaciones" row of the "Editar perfil" modal.
+    """
+    class Meta:
+        model = Branch
+        fields = ['id', 'name', 'address']
+        read_only_fields = fields
+
+
+class BranchLocationEntrySerializer(serializers.Serializer):
+    """
+    One location entry in a BranchLocationsReplaceSerializer payload.
+    `id` identifies an existing Branch to update in place; omit it to
+    create a new one.
+    """
+    id = serializers.IntegerField(required=False, allow_null=True)
+    name = serializers.CharField(max_length=100)
+    address = serializers.CharField(max_length=255)
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('El nombre no puede estar vacío.')
+        return value
+
+    def validate_address(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('La dirección no puede estar vacía.')
+        return value
+
+
+class BranchLocationsReplaceResponseSerializer(serializers.Serializer):
+    """
+    Response envelope for the full-replacement locations endpoint.
+    """
+    locations = BranchLocationSerializer(many=True, read_only=True)
+
+
+class BranchLocationsReplaceSerializer(serializers.Serializer):
+    """
+    Replaces the full set of a business's locations/addresses in one shot.
+    Existing branches are matched by `id` (and preserved, keeping any
+    attributes already attached); omitted `id`s are deleted, and entries
+    without an `id` are created. `business` is supplied via context, not
+    the payload, so `id`s can be validated as belonging to this business.
+    """
+    locations = BranchLocationEntrySerializer(many=True, allow_empty=True)
+
+    def validate_locations(self, value):
+        if len(value) > Branch.MAX_LOCATIONS:
+            raise serializers.ValidationError(
+                f'Puedes agregar como máximo {Branch.MAX_LOCATIONS} ubicaciones.'
+            )
+        business = self.context['business']
+        submitted_ids = {entry['id'] for entry in value if entry.get('id')}
+        if submitted_ids:
+            existing_ids = set(
+                business.branches.filter(id__in=submitted_ids).values_list('id', flat=True)
+            )
+            invalid_ids = submitted_ids - existing_ids
+            if invalid_ids:
+                raise serializers.ValidationError(
+                    f'No se encontraron las ubicaciones: {sorted(invalid_ids)}'
+                )
+        return value
+
+
 class BusinessProfileHomePageSerializer(serializers.ModelSerializer):
     """
     Serializer for business profile home page data.
@@ -198,18 +268,20 @@ class BusinessProfileHomePageSerializer(serializers.ModelSerializer):
     categories = BusinessCategorySerializer(many=True, read_only=True)
     headquarter_attributes = serializers.SerializerMethodField()
     profile_image = serializers.SerializerMethodField()
+    locations = BranchLocationSerializer(source='branches', many=True, read_only=True)
 
     class Meta:
         model = BusinessProfile
         fields = [
             'business_name',
-            'social_links', 
+            'social_links',
             'description',
             'categories',
             'profile_image',
-            'headquarter_attributes'
+            'headquarter_attributes',
+            'locations',
         ]
-    
+
     def get_headquarter_attributes(self, obj):
         """
         Get attributes from the headquarter branch (is_headquarter=True).
@@ -366,6 +438,22 @@ class AccountInfoUpdateSerializer(serializers.Serializer):
 
     # Categories: list of IDs
     categories = serializers.PrimaryKeyRelatedField(queryset=BusinessCategory.objects.all(), many=True, required=False)
+
+    def validate_business_id(self, value):
+        if not re.match(r'^[a-z0-9\-_]+$', value):
+            raise serializers.ValidationError(
+                'Solo se permiten letras minúsculas, números, guiones (-) y guiones bajos (_).'
+            )
+        if len(value) < 4 or len(value) > 24:
+            raise serializers.ValidationError(
+                'Debe tener entre 4 y 24 caracteres.'
+            )
+        existing = BusinessProfile.objects.filter(business_id__iexact=value)
+        if self.instance is not None:
+            existing = existing.exclude(pk=self.instance.pk)
+        if existing.exists():
+            raise serializers.ValidationError('Este nombre de usuario ya existe.')
+        return value
 
     def update(self, instance: BusinessProfile, validated_data):
         """Update BusinessProfile instance and related User fields.
