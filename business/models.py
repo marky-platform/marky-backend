@@ -164,6 +164,9 @@ class Branch(models.Model):
     """
     Model to handle Business Branches (Sucursales)
     """
+    # Tope de direcciones/ubicaciones editables desde el modal "Editar perfil".
+    MAX_LOCATIONS = 10
+
     business = models.ForeignKey(BusinessProfile, related_name='branches', on_delete=models.CASCADE)
     name = models.CharField(max_length=100)
     address = models.CharField(max_length=255)
