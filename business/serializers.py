@@ -11,6 +11,18 @@ from django.core.validators import URLValidator
 
 User = get_user_model()
 
+# business_id doubles as the public profile slug (marky.one/<business_id>),
+# so it must never collide with a static top-level frontend route
+# (marky-admin's src/routes/paths.ts) — those routes always win over the
+# `/:businessId` catch-all, which would make the business's own public page
+# permanently unreachable (e.g. business_id="home" always resolves to the
+# admin Home page instead of that business's profile).
+RESERVED_BUSINESS_IDS = {
+    'login', 'logout', 'register', 'home', 'configuration', 'account',
+    'product', 'verify-email', 'recover-password', 'reset-password',
+    'api', 'admin', 'public', 'static', 'media',
+}
+
 
 class BusinessProfileWriteSerializer(serializers.ModelSerializer):
     categories = serializers.PrimaryKeyRelatedField(queryset=BusinessCategory.objects.all(), many=True, required=False)
@@ -26,6 +38,11 @@ class BusinessProfileWriteSerializer(serializers.ModelSerializer):
             'primary_currency', 'secondary_currency', 'exchange_rate',
             'is_primary_to_secondary',
         ]
+
+    def validate_business_id(self, value):
+        if value.lower() in RESERVED_BUSINESS_IDS:
+            raise serializers.ValidationError('Este nombre de usuario no está disponible.')
+        return value
 
 
 class BusinessProfileListSerializer(serializers.ModelSerializer):
@@ -440,6 +457,8 @@ class AccountInfoUpdateSerializer(serializers.Serializer):
     categories = serializers.PrimaryKeyRelatedField(queryset=BusinessCategory.objects.all(), many=True, required=False)
 
     def validate_business_id(self, value):
+        if value.lower() in RESERVED_BUSINESS_IDS:
+            raise serializers.ValidationError('Este nombre de usuario no está disponible.')
         if not re.match(r'^[a-z0-9\-_]+$', value):
             raise serializers.ValidationError(
                 'Solo se permiten letras minúsculas, números, guiones (-) y guiones bajos (_).'

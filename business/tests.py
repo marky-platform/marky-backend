@@ -86,6 +86,39 @@ class TestBusinessProfileCreateExchangeDirection(MarkyAPITestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class TestBusinessIdReservedWords(MarkyAPITestCase):
+    """Regression: business_id doubles as the public profile slug
+    (marky.one/<business_id>); it must never collide with a static
+    marky-admin route (login, home, ...), or that business's public page
+    becomes permanently unreachable (the static route always wins over the
+    `/:businessId` catch-all)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, _ = cls.make_user('biz_reserved', 'biz_reserved@test.com', with_profile=False)
+
+    def test_create_rejects_a_reserved_business_id(self):
+        client = self.auth_client(self.user)
+        response = client.post('/api/v1/business/business_profile/', {
+            'business_id': 'home',
+            'primary_currency': self.primary_currency.id,
+            'is_primary_to_secondary': True,
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_rename_rejects_a_reserved_business_id(self):
+        user, profile = self.make_user('biz_reserved_rename', 'biz_reserved_rename@test.com')
+        client = self.auth_client(user)
+        response = client.patch('/api/v1/business/account-info/', {
+            'business_id': 'login',
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        profile.refresh_from_db()
+        self.assertEqual(profile.business_id, 'biz_reserved_rename')
+
+
 class SocialMediaLinksReplaceTests(MarkyAPITestCase):
     """Coverage for POST /business/social-media-links/bulk-update/, the
     full-replacement endpoint backing the Canales modal."""
@@ -233,6 +266,35 @@ class SocialMediaLinksReplaceTests(MarkyAPITestCase):
         self.assertIn('label', link)
         self.assertIn('order', link)
         self.assertEqual(link['label'], 'Pedidos')
+
+
+class PublicBusinessProfileAPITests(MarkyAPITestCase):
+    """Coverage for GET /api/v1/public/business/<business_id>/, the
+    unauthenticated business-profile endpoint backing the public page."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('biz_public', 'biz_public@test.com')
+
+    def test_anonymous_client_reaches_the_endpoint(self):
+        response = self.client.get(f'/api/v1/public/business/{self.profile.business_id}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['business_id'], self.profile.business_id)
+
+    def test_unknown_slug_404s(self):
+        response = self.client.get('/api/v1/public/business/does-not-exist/')
+        self.assertEqual(response.status_code, 404)
+
+    def test_response_does_not_leak_private_fields(self):
+        response = self.client.get(f'/api/v1/public/business/{self.profile.business_id}/')
+        self.assertEqual(response.status_code, 200)
+        for leaked_field in ('user', 'email', 'phone_number', 'exchange_rate'):
+            self.assertNotIn(leaked_field, response.data)
+
+    def test_slug_lookup_is_case_insensitive(self):
+        response = self.client.get(f'/api/v1/public/business/{self.profile.business_id.upper()}/')
+        self.assertEqual(response.status_code, 200)
 
 
 class TestSeedCurrencyNames(TestCase):

@@ -15,10 +15,10 @@ from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
 from .filters import ProductCategoryFilter, product_has_active_promotion_q
-from .promotions import INACTIVE
 from .models import ProductCategory, ProductVariant, ProductAddon
 from .models import Product
 from .services import handle_expired_promotions_for_business
+from .catalog import build_catalog_payload
 from .serializers import (
     ProductCategoryBasicSerializer,
     ProductCategoryWithProductsSerializer,
@@ -26,7 +26,6 @@ from .serializers import (
     ProductInputSerializer,
     PromotionSerializer,
     ProductCategoryOrderUpdateSerializer,
-    ProductLiteSerializer
 )
 
 
@@ -120,79 +119,16 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['get'], serializer_class=ProductCategoryWithProductsSerializer)
     def with_products(self, request):
-        base_qs = self.get_base_queryset()
-        category_filter = ProductCategoryFilter(request.GET, queryset=base_qs)
-        filtered_qs = category_filter.qs
-        has_promotion = bool(category_filter.form.cleaned_data.get('has_promotion'))
-
-        if has_promotion:
-            products_count = Product.objects.filter(category__in=filtered_qs).filter(
-                product_has_active_promotion_q()
-            ).count()
-            # Only the products that are actually on promotion should be shown within each category
-            filtered_qs = filtered_qs.prefetch_related(
-                models.Prefetch('products', queryset=Product.objects.filter(product_has_active_promotion_q()))
-            )
-        else:
-            products_count = filtered_qs.aggregate(total_products=models.Count('products'))['total_products']
-
-        # Products without a category aren't included in filtered_qs (there's no
-        # ProductCategory row for them), so products_count must account for them
-        # separately or a business whose only products are uncategorized would be
-        # reported as having zero products.
-        products_without_category = Product.objects.filter(category__isnull=True, business=self.request.user.business_profile)
-        if has_promotion:
-            products_without_category = products_without_category.filter(product_has_active_promotion_q())
-        products_count += products_without_category.count()
-
-        page = self.paginate_queryset(filtered_qs)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True, context={'request': request})
-            serialized_data = serializer.data
-
-            # Now, handle products without a category
-            if products_without_category.exists():
-                uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
-                no_category_data = {
-                    'id': None,
-                    'name': 'Sin categoría',
-                    'icon': 'fa-question-circle',
-                    'multibuy_option': None,
-                    'discount_percentage': 0,
-                    'promotion_starts_at': None,
-                    'promotion_ends_at': None,
-                    'promotion_status': INACTIVE,
-                    'products': uncategorized_products_serializer.data
-                }
-                serialized_data.append(no_category_data)
-
-            paginated_response = self.get_paginated_response(serialized_data)
-            paginated_response.data['products_count'] = products_count
-            return paginated_response
-
-        serializer = self.get_serializer(filtered_qs, many=True, context={'request': request})
-        serialized_data = serializer.data
-
-        # Also handle for non-paginated response
-        if products_without_category.exists():
-            uncategorized_products_serializer = ProductLiteSerializer(products_without_category, many=True, context={'request': request})
-            no_category_data = {
-                'id': None,
-                'name': 'Sin categoría',
-                'icon': 'fa-question-circle',
-                'multibuy_option': None,
-                'discount_percentage': 0,
-                'promotion_starts_at': None,
-                'promotion_ends_at': None,
-                'promotion_status': INACTIVE,
-                'products': uncategorized_products_serializer.data
-            }
-            serialized_data.append(no_category_data)
-
-        return Response({
-            'products_count': products_count,
-            'results': serialized_data
-        })
+        business = self.request.user.business_profile
+        handle_expired_promotions_for_business(business)
+        payload = build_catalog_payload(
+            business=business,
+            request=request,
+            query_params=request.GET,
+            paginator=self,
+            serializer_class=ProductCategoryWithProductsSerializer,
+        )
+        return Response(payload)
 
 
 @extend_schema(tags=['Products'])
