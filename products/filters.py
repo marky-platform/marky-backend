@@ -42,12 +42,23 @@ class ProductCategoryFilter(filters.FilterSet):
         model = ProductCategory
         fields = ['name', 'ids', 'has_promotion']
 
+    def __init__(self, *args, product_queryset=None, **kwargs):
+        # Scopes the has_promotion Exists subquery below to the same set of
+        # products the caller is allowed to see (e.g. is_active=True for the
+        # public catalog) — without this, a category whose only promoted
+        # product is hidden would still pass this category-level filter
+        # (just with an empty products list), showing up as a phantom
+        # "on promotion" category to anonymous callers. None (the admin
+        # default) preserves prior behavior: every product counts.
+        self.product_queryset = product_queryset if product_queryset is not None else Product.objects.all()
+        super().__init__(*args, **kwargs)
+
     def filter_has_promotion(self, queryset, name, value):
         now = timezone.now()
         promotion_conditions = _promotion_active_q(now)
 
         # Subquery to check for products with promotions within the category
-        products_with_promotions = Product.objects.filter(
+        products_with_promotions = self.product_queryset.filter(
             category=OuterRef('pk')
         ).filter(promotion_conditions)
 

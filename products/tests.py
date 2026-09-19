@@ -2017,3 +2017,142 @@ class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
         handle_expired_promotions_for_business(self.profile, now=now)
 
         self.assertEqual(Notification.objects.count(), 1)
+
+
+# ---------------------------------------------------------------------------
+# Public (unauthenticated) read API — marky.one/<business_id>
+# ---------------------------------------------------------------------------
+
+class TestPublicCatalogAndProductAPI(MarkyAPITestCase):
+    """Coverage for the anonymous read endpoints under /api/v1/public/business/<id>/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('public_biz', 'public_biz@test.com')
+        cls.category = ProductCategory.objects.create(
+            business=cls.profile, name='Platos', icon='fa-pizza', order=1,
+        )
+        cls.visible_product = Product.objects.create(
+            name='Visible', description='Desc', price=Decimal('10.00'),
+            business=cls.profile, category=cls.category, is_active=True,
+        )
+        cls.hidden_product = Product.objects.create(
+            name='Hidden', description='Desc', price=Decimal('20.00'),
+            business=cls.profile, category=cls.category, is_active=False,
+        )
+
+        # A second business, in a different currency, to prove there is no
+        # cross-tenant leakage and no currency-context bleed (A2).
+        cls.other_user, cls.other_profile = cls.make_user(
+            'other_public_biz', 'other_public_biz@test.com'
+        )
+        cls.other_profile.primary_currency = cls.secondary_currency  # PYG
+        cls.other_profile.save()
+        cls.other_product = Product.objects.create(
+            name='Theirs', description='Desc', price=Decimal('100000.00'),
+            business=cls.other_profile, is_active=True,
+        )
+
+    def test_anonymous_client_reaches_all_public_endpoints(self):
+        base = f'/api/v1/public/business/{self.profile.business_id}'
+
+        self.assertEqual(self.client.get(f'{base}/').status_code, 200)
+        self.assertEqual(self.client.get(f'{base}/catalog/').status_code, 200)
+        self.assertEqual(self.client.get(f'{base}/categories/').status_code, 200)
+        self.assertEqual(
+            self.client.get(f'{base}/products/{self.visible_product.id}/').status_code, 200
+        )
+
+    def test_unknown_slug_404s_on_every_endpoint(self):
+        base = '/api/v1/public/business/does-not-exist'
+
+        self.assertEqual(self.client.get(f'{base}/').status_code, 404)
+        self.assertEqual(self.client.get(f'{base}/catalog/').status_code, 404)
+        self.assertEqual(self.client.get(f'{base}/categories/').status_code, 404)
+        self.assertEqual(self.client.get(f'{base}/products/{self.visible_product.id}/').status_code, 404)
+
+    def test_inactive_product_absent_from_catalog(self):
+        response = self.client.get(f'/api/v1/public/business/{self.profile.business_id}/catalog/')
+        self.assertEqual(response.status_code, 200)
+        product_ids = [
+            product['id']
+            for category in response.data['results']
+            for product in category['products']
+        ]
+        self.assertIn(self.visible_product.id, product_ids)
+        self.assertNotIn(self.hidden_product.id, product_ids)
+
+    def test_inactive_product_404s_on_detail(self):
+        response = self.client.get(
+            f'/api/v1/public/business/{self.profile.business_id}/products/{self.hidden_product.id}/'
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_product_of_business_a_not_reachable_under_business_b_slug(self):
+        response = self.client.get(
+            f'/api/v1/public/business/{self.other_profile.business_id}/'
+            f'products/{self.visible_product.id}/'
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_prices_use_target_businesss_currency_even_when_a_different_merchant_is_authenticated(self):
+        """Regression for the A2 fix: ProductPriceMixin/ProductLiteSerializer
+        must not prefer the authenticated caller's own business_profile over
+        the business_profile passed explicitly in serializer context."""
+        client = self.auth_client(self.user)  # authenticated as the USD-priced business
+
+        response = client.get(
+            f'/api/v1/public/business/{self.other_profile.business_id}/'
+            f'products/{self.other_product.id}/'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['primary_price'], 'PYG 100.000')
+
+        anon_response = self.client.get(
+            f'/api/v1/public/business/{self.other_profile.business_id}/'
+            f'products/{self.other_product.id}/'
+        )
+        self.assertEqual(anon_response.data['primary_price'], response.data['primary_price'])
+
+    def test_no_promo_expiry_writes_occur_on_a_public_read(self):
+        now = timezone.now()
+        expired = Product.objects.create(
+            name='Expired Promo', description='Desc', price=Decimal('10.00'),
+            business=self.profile, discount_percentage=Decimal('30.00'),
+            promotion_ends_at=now - timedelta(days=1),
+        )
+
+        self.client.get(f'/api/v1/public/business/{self.profile.business_id}/catalog/')
+        self.client.get(
+            f'/api/v1/public/business/{self.profile.business_id}/products/{expired.id}/'
+        )
+
+        expired.refresh_from_db()
+        self.assertEqual(expired.discount_percentage, Decimal('30.00'))
+        self.assertIsNotNone(expired.promotion_ends_at)
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_has_promotion_hides_a_category_whose_only_promoted_product_is_inactive(self):
+        """Regression: ProductCategoryFilter.filter_has_promotion's Exists
+        subquery must be scoped to the same is_active=True product_queryset
+        the public catalog otherwise applies, or a category whose only
+        promoted product is hidden shows up as a phantom (empty) category
+        under ?has_promotion=true."""
+        hidden_promo_category = ProductCategory.objects.create(
+            business=self.profile, name='Solo Oculto', icon='fa-box', order=2,
+        )
+        Product.objects.create(
+            name='Hidden Promo Product', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=hidden_promo_category, is_active=False,
+            discount_percentage=Decimal('20.00'),
+        )
+
+        response = self.client.get(
+            f'/api/v1/public/business/{self.profile.business_id}/catalog/',
+            {'has_promotion': 'true'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        category_ids = [category['id'] for category in response.data['results']]
+        self.assertNotIn(hidden_promo_category.id, category_ids)

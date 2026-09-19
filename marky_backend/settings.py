@@ -211,6 +211,7 @@ CORS_ALLOWED_ORIGINS = [
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://marky-admin.*\.vercel\.app$",
+    r"^https://(www\.)?marky\.one$",
 ] + env.list("CORS_ALLOWED_ORIGIN_REGEXES", default=[])
 
 CORS_EXPOSE_HEADERS = [
@@ -265,6 +266,7 @@ REST_FRAMEWORK = {
         'auth': '10/minute',
         'resend': '3/minute',
         'recovery': '5/minute',
+        'public': '60/minute',
     },
     'DEFAULT_PARSER_CLASSES': [
         'drf_nested_forms.parsers.NestedMultiPartParser',

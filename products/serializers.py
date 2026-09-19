@@ -59,6 +59,9 @@ class ProductPriceMixin:
     """
 
     def _get_business_profile(self, obj):
+        context_bp = self.context.get('business_profile')
+        if context_bp is not None:
+            return context_bp
         request = self.context.get('request')
         if request and hasattr(request.user, 'business_profile'):
             return request.user.business_profile
@@ -366,11 +369,11 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
                   'primary_price', 'secondary_price',
                   'primary_price_with_discount', 'secondary_price_with_discount']
 
-    def _get_business_profile(self, obj):
-        request = self.context.get('request')
-        if request and hasattr(request.user, 'business_profile'):
-            return request.user.business_profile
-        return getattr(obj, 'business', None)
+    # _get_business_profile is inherited from ProductPriceMixin — for a
+    # Product instance it resolves identically (context override, then
+    # request.user's own profile, then obj.business), so overriding it here
+    # too only risked the two copies drifting out of sync on a future fix
+    # (the A2 context-priority patch already had to touch both).
 
     def _get_amounts(self, obj):
         """Memoized get_primary_secondary_amounts(bp) per object.

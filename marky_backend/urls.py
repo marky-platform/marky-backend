@@ -25,6 +25,7 @@ api_v1_patterns = [
     path('business/', include('business.urls')),
     path('products/', include('products.urls')),
     path('notifications/', include('notifications.urls')),
+    path('public/', include('marky_backend.public_urls')),
 ]
 
 urlpatterns = [
