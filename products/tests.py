@@ -2368,3 +2368,228 @@ class TestProductExtraFields(MarkyAPITestCase):
         self.assertEqual(response.status_code, 200, response.data)
         product.refresh_from_db()
         self.assertIsNone(product.category)
+
+
+class TestProductManualOrder(MarkyAPITestCase):
+    """Manual product ordering per category: display order, assignment on
+    create/move, and the update_products_order endpoint."""
+
+    PRODUCTS_URL = '/api/v1/products/products/'
+    CATEGORIES_URL = '/api/v1/products/product-categories/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('order_user', 'order_user@test.com')
+        cls.other_user, cls.other_profile = cls.make_user('order_other', 'order_other@test.com')
+
+    def setUp(self):
+        self.category = ProductCategory.objects.create(business=self.profile, name='Cat', icon='icon', order=1)
+        self.client_ = self.auth_client(self.user)
+
+    def _product(self, name, order, category='default', stopper=None, profile=None, **kwargs):
+        return Product.objects.create(
+            name=name, description='D', price=Decimal('10.00'),
+            business=profile or self.profile,
+            category=self.category if category == 'default' else category,
+            order=order, stopper=stopper, **kwargs,
+        )
+
+    def _with_products_ids(self, query='', client=None):
+        response = (client or self.client_).get(f'{self.CATEGORIES_URL}with_products/{query}')
+        self.assertEqual(response.status_code, 200, response.data)
+        for category in response.data['results']:
+            if category['id'] == self.category.id:
+                return [p['id'] for p in category['products']]
+        return None
+
+    def _update_order(self, product_ids, category=None, client=None):
+        category = category or self.category
+        return (client or self.client_).post(
+            f'{self.CATEGORIES_URL}{category.id}/update_products_order/',
+            {'product_ids': product_ids}, format='json',
+        )
+
+    # --- display ordering -------------------------------------------------
+
+    def test_with_products_orders_stoppers_first_then_manual_order(self):
+        regular_b = self._product('B', order=2)
+        regular_a = self._product('A', order=1)
+        recommended = self._product('R', order=9, stopper='RECOMMENDED')
+        favorite = self._product('F', order=8, stopper='FAVORITE')
+
+        self.assertEqual(
+            self._with_products_ids(),
+            [favorite.id, recommended.id, regular_a.id, regular_b.id],
+        )
+
+    def test_ties_on_order_break_by_id(self):
+        first = self._product('First', order=0)
+        second = self._product('Second', order=0)
+        self.assertEqual(self._with_products_ids(), [first.id, second.id])
+
+    def test_ordering_holds_under_has_promotion_filter(self):
+        later = self._product('Later', order=2, discount_percentage=Decimal('10'))
+        earlier = self._product('Earlier', order=1, discount_percentage=Decimal('10'))
+        favorite = self._product('Fav', order=5, stopper='FAVORITE', discount_percentage=Decimal('10'))
+        self._product('NoPromo', order=0)
+
+        self.assertEqual(
+            self._with_products_ids('?has_promotion=true'),
+            [favorite.id, earlier.id, later.id],
+        )
+
+    def test_ordering_holds_on_public_catalog(self):
+        second = self._product('Second', order=2)
+        first = self._product('First', order=1)
+        favorite = self._product('Fav', order=3, stopper='FAVORITE')
+        self._product('Hidden', order=0, is_active=False)
+
+        response = self.client.get(f'/api/v1/public/business/{self.profile.business_id}/catalog/')
+        self.assertEqual(response.status_code, 200)
+        ids = [p['id'] for c in response.data['results'] if c['id'] == self.category.id for p in c['products']]
+        self.assertEqual(ids, [favorite.id, first.id, second.id])
+
+    def test_uncategorized_products_follow_order(self):
+        second = self._product('Second', order=2, category=None)
+        first = self._product('First', order=1, category=None)
+        response = self.client_.get(f'{self.CATEGORIES_URL}with_products/')
+        bucket = next(c for c in response.data['results'] if c['id'] is None)
+        self.assertEqual([p['id'] for p in bucket['products']], [first.id, second.id])
+
+    def test_losing_stopper_falls_back_to_stored_order(self):
+        a = self._product('A', order=1)
+        favorite = self._product('Fav', order=2, stopper='FAVORITE')
+        b = self._product('B', order=3)
+        self.assertEqual(self._with_products_ids(), [favorite.id, a.id, b.id])
+
+        favorite.stopper = None
+        favorite.save()
+        self.assertEqual(self._with_products_ids(), [a.id, favorite.id, b.id])
+
+    # --- assignment on create / move -------------------------------------
+
+    def test_create_appends_to_end_of_category(self):
+        self._product('A', order=1)
+        self._product('B', order=7)
+        response = self.client_.post(
+            self.PRODUCTS_URL,
+            {'name': 'New', 'description': 'D', 'price': '5.00', 'category': self.category.id},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Product.objects.latest('id').order, 8)
+
+    def test_create_in_empty_category_starts_at_one(self):
+        response = self.client_.post(
+            self.PRODUCTS_URL,
+            {'name': 'New', 'description': 'D', 'price': '5.00', 'category': self.category.id},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Product.objects.latest('id').order, 1)
+
+    def test_moving_to_another_category_appends_to_end(self):
+        other = ProductCategory.objects.create(business=self.profile, name='Other', icon='icon', order=2)
+        self._product('Existing', order=4, category=other)
+        moved = self._product('Moved', order=1)
+
+        response = self.client_.patch(
+            f'{self.PRODUCTS_URL}{moved.id}/', {'category': other.id}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        moved.refresh_from_db()
+        self.assertEqual(moved.order, 5)
+
+    def test_edit_in_same_category_keeps_order(self):
+        self._product('A', order=1)
+        target = self._product('B', order=2)
+        response = self.client_.patch(
+            f'{self.PRODUCTS_URL}{target.id}/',
+            {'name': 'Renamed', 'category': self.category.id}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        target.refresh_from_db()
+        self.assertEqual(target.order, 2)
+
+    # --- update_products_order endpoint ----------------------------------
+
+    def test_update_products_order_persists_and_is_reflected(self):
+        a = self._product('A', order=1)
+        b = self._product('B', order=2)
+        c = self._product('C', order=3)
+
+        response = self._update_order([c.id, a.id, b.id])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self._with_products_ids(), [c.id, a.id, b.id])
+        self.assertEqual(
+            list(Product.objects.filter(category=self.category).order_by('order').values_list('id', 'order')),
+            [(c.id, 1), (a.id, 2), (b.id, 3)],
+        )
+
+    def test_update_products_order_rejects_duplicate_ids(self):
+        a = self._product('A', order=1)
+        b = self._product('B', order=2)
+        response = self._update_order([a.id, a.id, b.id])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('error', response.data)
+
+    def test_update_products_order_rejects_missing_id(self):
+        a = self._product('A', order=1)
+        self._product('B', order=2)
+        response = self._update_order([a.id])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('error', response.data)
+
+    def test_update_products_order_rejects_foreign_id(self):
+        a = self._product('A', order=1)
+        foreign = self._product('Theirs', order=1, category=None, profile=self.other_profile)
+        response = self._update_order([a.id, foreign.id])
+        self.assertEqual(response.status_code, 400)
+        foreign.refresh_from_db()
+        self.assertEqual(foreign.order, 1)
+
+    def test_update_products_order_failure_leaves_order_untouched(self):
+        a = self._product('A', order=1)
+        b = self._product('B', order=2)
+        self._update_order([b.id, b.id])
+        a.refresh_from_db()
+        b.refresh_from_db()
+        self.assertEqual((a.order, b.order), (1, 2))
+
+    def test_update_products_order_other_business_category_is_404(self):
+        theirs = ProductCategory.objects.create(business=self.other_profile, name='Theirs', icon='icon')
+        response = self._update_order([], category=theirs)
+        self.assertEqual(response.status_code, 404)
+
+    def test_update_products_order_empty_category_with_empty_list_is_ok(self):
+        response = self._update_order([])
+        self.assertEqual(response.status_code, 200)
+
+    def test_update_products_order_empty_list_on_nonempty_category_is_400(self):
+        self._product('A', order=1)
+        response = self._update_order([])
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_products_order_requires_authentication(self):
+        response = self.client.post(
+            f'{self.CATEGORIES_URL}{self.category.id}/update_products_order/',
+            {'product_ids': []}, format='json',
+        )
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_update_products_order_rejects_malformed_body(self):
+        response = self.client_.post(
+            f'{self.CATEGORIES_URL}{self.category.id}/update_products_order/',
+            {'product_ids': 'nope'}, format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    # --- migration backfill ----------------------------------------------
+
+    def test_next_product_order_helper(self):
+        from products.models import next_product_order
+        self.assertEqual(next_product_order(self.category), 1)
+        self._product('A', order=4)
+        self.assertEqual(next_product_order(self.category), 5)
+        self.assertEqual(next_product_order(None), 1)

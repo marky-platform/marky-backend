@@ -528,6 +528,10 @@ class ProductCategoryOrderUpdateSerializer(serializers.Serializer):
     categories = ProductCategoryOrderSerializer(many=True)
 
 
+class ProductOrderUpdateSerializer(serializers.Serializer):
+    product_ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=True)
+
+
 class RawJSONField(serializers.JSONField):
     """JSONField that hands the raw multipart value to validate_<field>.
 

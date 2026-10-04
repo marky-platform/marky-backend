@@ -40,6 +40,14 @@ class ProductCategory(models.Model):
         ordering = ['order']
 
 
+def next_product_order(category):
+    """Position that puts a product at the end of `category` (1 for an empty or missing one)."""
+    if category is None:
+        return 1
+    max_order = Product.objects.filter(category=category).aggregate(models.Max('order'))['order__max']
+    return (max_order or 0) + 1
+
+
 class Product(models.Model):
     STOPPER_CHOICES = [
         ('FAVORITE', 'Favorito del mes'),
@@ -86,6 +94,8 @@ class Product(models.Model):
     celiac_info = models.JSONField(
         null=True, blank=True, help_text="Declaraciones SIN TACC; null = desactivado"
     )
+    # manual position inside its category (see products.catalog.product_display_ordering)
+    order = models.PositiveIntegerField(default=0)
     #
     business = models.ForeignKey(BusinessProfile, on_delete=models.CASCADE, related_name='products')
 
