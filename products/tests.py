@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -2156,3 +2157,501 @@ class TestPublicCatalogAndProductAPI(MarkyAPITestCase):
         self.assertEqual(response.status_code, 200)
         category_ids = [category['id'] for category in response.data['results']]
         self.assertNotIn(hidden_promo_category.id, category_ids)
+
+    def _public_detail(self, product):
+        response = self.client.get(
+            f'/api/v1/public/business/{self.profile.business_id}/products/{product.id}/'
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_public_detail_exposes_descriptive_extras(self):
+        product = Product.objects.create(
+            name='Torta', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, is_active=True,
+            featured_ingredients='Chocolate,Dulce de leche',
+            allergens='milk,egg',
+            presentation={
+                'version': 1,
+                'amount': {'type': 'weight', 'value': 1.5, 'unit': 'kg'},
+                'dimensions': {'shape': 'round', 'diameterCm': 22},
+                'approximateYield': {'minPeople': 12, 'maxPeople': 15},
+            },
+            celiac_info={
+                'version': 1,
+                'crossContaminationControl': True,
+                'glutenFreeGrains': False,
+                'certifiedProtocol': True,
+            },
+        )
+
+        data = self._public_detail(product)
+
+        self.assertEqual(data['featured_ingredients'], 'Chocolate,Dulce de leche')
+        self.assertEqual(data['allergens'], 'milk,egg')
+        self.assertEqual(data['presentation']['amount'], {'type': 'weight', 'value': 1.5, 'unit': 'kg'})
+        self.assertEqual(data['presentation']['approximateYield'], {'minPeople': 12, 'maxPeople': 15})
+        self.assertTrue(data['celiac_info']['crossContaminationControl'])
+        self.assertFalse(data['celiac_info']['glutenFreeGrains'])
+
+    def test_public_detail_returns_nulls_for_legacy_products(self):
+        data = self._public_detail(self.visible_product)
+
+        for field in ('featured_ingredients', 'allergens', 'presentation', 'celiac_info'):
+            self.assertIn(field, data)
+            self.assertIsNone(data[field])
+
+    def test_public_detail_nulls_malformed_json_extras(self):
+        product = Product.objects.create(
+            name='Hand edited', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, is_active=True,
+            presentation={'version': 7, 'amount': 'lots'},
+            celiac_info={'version': 1, 'crossContaminationControl': 'yes'},
+        )
+
+        data = self._public_detail(product)
+
+        self.assertIsNone(data['presentation'])
+        self.assertIsNone(data['celiac_info'])
+
+    def test_public_detail_still_hides_admin_only_fields(self):
+        data = self._public_detail(self.visible_product)
+
+        for field in ('business', 'is_active', 'order'):
+            self.assertNotIn(field, data)
+
+
+class TestProductExtraFields(MarkyAPITestCase):
+    """Featured ingredients, presentation, allergens and SIN TACC (celiac_info)."""
+
+    URL = '/api/v1/products/products/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('extras_user', 'extras@test.com')
+
+    def _create(self, **extra):
+        payload = {'name': 'P', 'description': 'D', 'price': '10.00'}
+        payload.update(extra)
+        return self.auth_client(self.user).post(self.URL, payload, format='multipart')
+
+    def _patch(self, product, **data):
+        return self.auth_client(self.user).patch(
+            f'{self.URL}{product.id}/', data, format='multipart',
+        )
+
+    def _product(self, **kwargs):
+        return Product.objects.create(
+            name='P', description='D', price=Decimal('10.00'), business=self.profile, **kwargs
+        )
+
+    def test_create_without_new_fields_defaults_to_null(self):
+        response = self._create()
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.latest('id')
+        self.assertIsNone(product.featured_ingredients)
+        self.assertIsNone(product.presentation)
+        self.assertIsNone(product.allergens)
+        self.assertIsNone(product.celiac_info)
+
+    def test_existing_product_serializes_null_fields(self):
+        product = self._product()
+        response = self.auth_client(self.user).get(f'{self.URL}{product.id}/')
+        self.assertEqual(response.status_code, 200)
+        for field in ('featured_ingredients', 'presentation', 'allergens', 'celiac_info'):
+            self.assertIsNone(response.data[field])
+
+    def test_create_with_all_fields(self):
+        presentation = {
+            'version': 1,
+            'amount': {'type': 'weight', 'value': 1.5, 'unit': 'kg'},
+            'dimensions': {'shape': 'round', 'diameterCm': 22, 'lengthCm': None,
+                           'widthCm': None, 'heightCm': 8},
+            'approximateYield': {'minPeople': 12, 'maxPeople': 15},
+        }
+        celiac = {'version': 1, 'crossContaminationControl': True,
+                  'glutenFreeGrains': False, 'certifiedProtocol': True}
+        response = self._create(
+            featured_ingredients='Tomate,Albahaca',
+            allergens='egg,milk',
+            presentation=json.dumps(presentation),
+            celiac_info=json.dumps(celiac),
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.latest('id')
+        self.assertEqual(product.featured_ingredients, 'Tomate,Albahaca')
+        self.assertEqual(product.allergens, 'milk,egg')  # canonical catalog order
+        self.assertEqual(product.presentation, presentation)
+        self.assertEqual(product.celiac_info, celiac)
+        self.assertEqual(response.data['presentation']['amount']['value'], 1.5)
+
+    def test_clear_with_empty_string(self):
+        product = self._product(
+            featured_ingredients='A', allergens='milk',
+            presentation={'version': 1, 'amount': None, 'dimensions': None,
+                          'approximateYield': {'minPeople': 2, 'maxPeople': None}},
+            celiac_info={'version': 1, 'crossContaminationControl': True,
+                         'glutenFreeGrains': True, 'certifiedProtocol': True},
+        )
+        response = self._patch(
+            product, featured_ingredients='', allergens='', presentation='', celiac_info='',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        self.assertIsNone(product.featured_ingredients)
+        self.assertIsNone(product.allergens)
+        self.assertIsNone(product.presentation)
+        self.assertIsNone(product.celiac_info)
+
+    def test_omitted_fields_are_preserved_on_patch(self):
+        product = self._product(featured_ingredients='A,B', allergens='soy')
+        response = self._patch(product, price='12.00')
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        self.assertEqual(product.featured_ingredients, 'A,B')
+        self.assertEqual(product.allergens, 'soy')
+
+    def test_ingredients_rules(self):
+        self.assertEqual(self._create(featured_ingredients='a,A').status_code, 400)
+        self.assertEqual(self._create(featured_ingredients=','.join(str(i) for i in range(9))).status_code, 400)
+        self.assertEqual(self._create(featured_ingredients='a,,b').status_code, 400)
+        ok = self._create(featured_ingredients=','.join(str(i) for i in range(8)))
+        self.assertEqual(ok.status_code, 201, ok.data)
+
+    def test_unknown_allergen_rejected(self):
+        response = self._create(allergens='milk,kryptonite')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('allergens', response.data)
+
+    def _presentation(self, **overrides):
+        base = {'version': 1, 'amount': None, 'dimensions': None, 'approximateYield': None}
+        base.update(overrides)
+        return json.dumps(base)
+
+    def test_invalid_presentation_payloads(self):
+        bad = [
+            {'amount': {'type': 'units', 'value': 0, 'unit': None}},
+            {'amount': {'type': 'units', 'value': 1.5, 'unit': None}},
+            {'amount': {'type': 'units', 'value': 2, 'unit': 'g'}},
+            {'amount': {'type': 'weight', 'value': 2, 'unit': 'ml'}},
+            {'amount': {'type': 'weight', 'value': -1, 'unit': 'g'}},
+            {'amount': {'type': 'bogus', 'value': 1, 'unit': None}},
+            {'amount': {'type': 'weight', 'value': '1', 'unit': 'g'}},
+            {'dimensions': {'shape': 'round', 'diameterCm': None, 'heightCm': None}},
+            {'dimensions': {'shape': 'round', 'diameterCm': 10, 'lengthCm': 5}},
+            {'dimensions': {'shape': 'rectangular', 'lengthCm': 10}},
+            {'dimensions': {'shape': 'round', 'diameterCm': 10, 'heightCm': 0}},
+            {'approximateYield': {'minPeople': 0, 'maxPeople': None}},
+            {'approximateYield': {'minPeople': 5, 'maxPeople': 4}},
+            {'approximateYield': {'minPeople': 5, 'extra': 1}},
+        ]
+        for overrides in bad:
+            with self.subTest(overrides=overrides):
+                response = self._create(presentation=self._presentation(**overrides))
+                self.assertEqual(response.status_code, 400, overrides)
+                self.assertIn('presentation', response.data)
+
+    def test_presentation_malformed_json_and_unknown_keys(self):
+        self.assertEqual(self._create(presentation='{not json').status_code, 400)
+        self.assertEqual(self._create(presentation=json.dumps({'version': 2})).status_code, 400)
+        self.assertEqual(
+            self._create(presentation=json.dumps({'version': 1, 'foo': 1})).status_code, 400
+        )
+
+    def test_celiac_validation(self):
+        full = {'version': 1, 'crossContaminationControl': False,
+                'glutenFreeGrains': False, 'certifiedProtocol': False}
+        ok = self._create(celiac_info=json.dumps(full))
+        self.assertEqual(ok.status_code, 201, ok.data)  # enabled with zero declarations allowed
+        for bad in (
+            {**full, 'glutenFreeGrains': 'yes'},
+            {**full, 'extra': True},
+            {'version': 1, 'crossContaminationControl': True},
+            {**full, 'version': 2},
+        ):
+            with self.subTest(bad=bad):
+                self.assertEqual(self._create(celiac_info=json.dumps(bad)).status_code, 400)
+
+    def test_presentation_hostile_payloads_return_400_not_500(self):
+        hostile = [
+            {'version': 1, 'amount': {'type': [], 'value': 1, 'unit': None}},
+            {'version': 1, 'dimensions': {'shape': {}}},
+            {'version': 1, 'amount': {'type': 'weight', 'value': 10 ** 400, 'unit': 'g'}},
+            {'version': 1, 'amount': {'type': 'weight', 'value': 1e308, 'unit': 'g'}},
+            {'version': 1, 'dimensions': {'shape': 'round', 'diameterCm': 1e-320}},
+            {'version': 1, 'approximateYield': {'minPeople': 10 ** 30, 'maxPeople': None}},
+            {'version': True},
+        ]
+        for payload in hostile:
+            with self.subTest(payload=str(payload)[:60]):
+                response = self._create(presentation=json.dumps(payload))
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._create(presentation='[' * 100000).status_code, 400)
+        self.assertEqual(self._create(presentation='[]').status_code, 400)
+
+    def test_ingredient_named_null_is_stored_not_cleared(self):
+        response = self._create(featured_ingredients='Null')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Product.objects.latest('id').featured_ingredients, 'Null')
+
+    def test_new_fields_work_when_request_also_has_nested_keys(self):
+        # Bracket keys make drf_nested_forms coerce "true"/"123" etc.
+        response = self._create(
+            featured_ingredients='true',
+            allergens='milk',
+            presentation=json.dumps({
+                'version': 1, 'amount': None, 'dimensions': None,
+                'approximateYield': {'minPeople': 3, 'maxPeople': None},
+            }),
+            celiac_info='',
+            **{'addons[0][name]': 'Extra', 'addons[0][price]': '1.00'},
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.latest('id')
+        self.assertEqual(product.featured_ingredients, 'true')
+        self.assertEqual(product.allergens, 'milk')
+        self.assertEqual(product.presentation['approximateYield']['minPeople'], 3)
+        self.assertIsNone(product.celiac_info)
+
+    def test_put_without_new_fields_is_accepted(self):
+        product = self._product()
+        response = self.auth_client(self.user).put(
+            f'{self.URL}{product.id}/',
+            {'name': 'P2', 'description': 'D', 'price': '10.00'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_category_empty_string_clears_category_on_patch(self):
+        category = ProductCategory.objects.create(name='Bebidas', business=self.profile)
+        product = self._product(category=category)
+        response = self._patch(product, category='')
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        self.assertIsNone(product.category)
+
+
+class TestProductManualOrder(MarkyAPITestCase):
+    """Manual product ordering per category: display order, assignment on
+    create/move, and the update_products_order endpoint."""
+
+    PRODUCTS_URL = '/api/v1/products/products/'
+    CATEGORIES_URL = '/api/v1/products/product-categories/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('order_user', 'order_user@test.com')
+        cls.other_user, cls.other_profile = cls.make_user('order_other', 'order_other@test.com')
+
+    def setUp(self):
+        self.category = ProductCategory.objects.create(business=self.profile, name='Cat', icon='icon', order=1)
+        self.client_ = self.auth_client(self.user)
+
+    def _product(self, name, order, category='default', stopper=None, profile=None, **kwargs):
+        return Product.objects.create(
+            name=name, description='D', price=Decimal('10.00'),
+            business=profile or self.profile,
+            category=self.category if category == 'default' else category,
+            order=order, stopper=stopper, **kwargs,
+        )
+
+    def _with_products_ids(self, query='', client=None):
+        response = (client or self.client_).get(f'{self.CATEGORIES_URL}with_products/{query}')
+        self.assertEqual(response.status_code, 200, response.data)
+        for category in response.data['results']:
+            if category['id'] == self.category.id:
+                return [p['id'] for p in category['products']]
+        return None
+
+    def _update_order(self, product_ids, category=None, client=None):
+        category = category or self.category
+        return (client or self.client_).post(
+            f'{self.CATEGORIES_URL}{category.id}/update_products_order/',
+            {'product_ids': product_ids}, format='json',
+        )
+
+    # --- display ordering -------------------------------------------------
+
+    def test_with_products_orders_stoppers_first_then_manual_order(self):
+        regular_b = self._product('B', order=2)
+        regular_a = self._product('A', order=1)
+        recommended = self._product('R', order=9, stopper='RECOMMENDED')
+        favorite = self._product('F', order=8, stopper='FAVORITE')
+
+        self.assertEqual(
+            self._with_products_ids(),
+            [favorite.id, recommended.id, regular_a.id, regular_b.id],
+        )
+
+    def test_ties_on_order_break_by_id(self):
+        first = self._product('First', order=0)
+        second = self._product('Second', order=0)
+        self.assertEqual(self._with_products_ids(), [first.id, second.id])
+
+    def test_ordering_holds_under_has_promotion_filter(self):
+        later = self._product('Later', order=2, discount_percentage=Decimal('10'))
+        earlier = self._product('Earlier', order=1, discount_percentage=Decimal('10'))
+        favorite = self._product('Fav', order=5, stopper='FAVORITE', discount_percentage=Decimal('10'))
+        self._product('NoPromo', order=0)
+
+        self.assertEqual(
+            self._with_products_ids('?has_promotion=true'),
+            [favorite.id, earlier.id, later.id],
+        )
+
+    def test_ordering_holds_on_public_catalog(self):
+        second = self._product('Second', order=2)
+        first = self._product('First', order=1)
+        favorite = self._product('Fav', order=3, stopper='FAVORITE')
+        self._product('Hidden', order=0, is_active=False)
+
+        response = self.client.get(f'/api/v1/public/business/{self.profile.business_id}/catalog/')
+        self.assertEqual(response.status_code, 200)
+        ids = [p['id'] for c in response.data['results'] if c['id'] == self.category.id for p in c['products']]
+        self.assertEqual(ids, [favorite.id, first.id, second.id])
+
+    def test_uncategorized_products_follow_order(self):
+        second = self._product('Second', order=2, category=None)
+        first = self._product('First', order=1, category=None)
+        response = self.client_.get(f'{self.CATEGORIES_URL}with_products/')
+        bucket = next(c for c in response.data['results'] if c['id'] is None)
+        self.assertEqual([p['id'] for p in bucket['products']], [first.id, second.id])
+
+    def test_losing_stopper_falls_back_to_stored_order(self):
+        a = self._product('A', order=1)
+        favorite = self._product('Fav', order=2, stopper='FAVORITE')
+        b = self._product('B', order=3)
+        self.assertEqual(self._with_products_ids(), [favorite.id, a.id, b.id])
+
+        favorite.stopper = None
+        favorite.save()
+        self.assertEqual(self._with_products_ids(), [a.id, favorite.id, b.id])
+
+    # --- assignment on create / move -------------------------------------
+
+    def test_create_appends_to_end_of_category(self):
+        self._product('A', order=1)
+        self._product('B', order=7)
+        response = self.client_.post(
+            self.PRODUCTS_URL,
+            {'name': 'New', 'description': 'D', 'price': '5.00', 'category': self.category.id},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Product.objects.latest('id').order, 8)
+
+    def test_create_in_empty_category_starts_at_one(self):
+        response = self.client_.post(
+            self.PRODUCTS_URL,
+            {'name': 'New', 'description': 'D', 'price': '5.00', 'category': self.category.id},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Product.objects.latest('id').order, 1)
+
+    def test_moving_to_another_category_appends_to_end(self):
+        other = ProductCategory.objects.create(business=self.profile, name='Other', icon='icon', order=2)
+        self._product('Existing', order=4, category=other)
+        moved = self._product('Moved', order=1)
+
+        response = self.client_.patch(
+            f'{self.PRODUCTS_URL}{moved.id}/', {'category': other.id}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        moved.refresh_from_db()
+        self.assertEqual(moved.order, 5)
+
+    def test_edit_in_same_category_keeps_order(self):
+        self._product('A', order=1)
+        target = self._product('B', order=2)
+        response = self.client_.patch(
+            f'{self.PRODUCTS_URL}{target.id}/',
+            {'name': 'Renamed', 'category': self.category.id}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        target.refresh_from_db()
+        self.assertEqual(target.order, 2)
+
+    # --- update_products_order endpoint ----------------------------------
+
+    def test_update_products_order_persists_and_is_reflected(self):
+        a = self._product('A', order=1)
+        b = self._product('B', order=2)
+        c = self._product('C', order=3)
+
+        response = self._update_order([c.id, a.id, b.id])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self._with_products_ids(), [c.id, a.id, b.id])
+        self.assertEqual(
+            list(Product.objects.filter(category=self.category).order_by('order').values_list('id', 'order')),
+            [(c.id, 1), (a.id, 2), (b.id, 3)],
+        )
+
+    def test_update_products_order_rejects_duplicate_ids(self):
+        a = self._product('A', order=1)
+        b = self._product('B', order=2)
+        response = self._update_order([a.id, a.id, b.id])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('error', response.data)
+
+    def test_update_products_order_rejects_missing_id(self):
+        a = self._product('A', order=1)
+        self._product('B', order=2)
+        response = self._update_order([a.id])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('error', response.data)
+
+    def test_update_products_order_rejects_foreign_id(self):
+        a = self._product('A', order=1)
+        foreign = self._product('Theirs', order=1, category=None, profile=self.other_profile)
+        response = self._update_order([a.id, foreign.id])
+        self.assertEqual(response.status_code, 400)
+        foreign.refresh_from_db()
+        self.assertEqual(foreign.order, 1)
+
+    def test_update_products_order_failure_leaves_order_untouched(self):
+        a = self._product('A', order=1)
+        b = self._product('B', order=2)
+        self._update_order([b.id, b.id])
+        a.refresh_from_db()
+        b.refresh_from_db()
+        self.assertEqual((a.order, b.order), (1, 2))
+
+    def test_update_products_order_other_business_category_is_404(self):
+        theirs = ProductCategory.objects.create(business=self.other_profile, name='Theirs', icon='icon')
+        response = self._update_order([], category=theirs)
+        self.assertEqual(response.status_code, 404)
+
+    def test_update_products_order_empty_category_with_empty_list_is_ok(self):
+        response = self._update_order([])
+        self.assertEqual(response.status_code, 200)
+
+    def test_update_products_order_empty_list_on_nonempty_category_is_400(self):
+        self._product('A', order=1)
+        response = self._update_order([])
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_products_order_requires_authentication(self):
+        response = self.client.post(
+            f'{self.CATEGORIES_URL}{self.category.id}/update_products_order/',
+            {'product_ids': []}, format='json',
+        )
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_update_products_order_rejects_malformed_body(self):
+        response = self.client_.post(
+            f'{self.CATEGORIES_URL}{self.category.id}/update_products_order/',
+            {'product_ids': 'nope'}, format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    # --- migration backfill ----------------------------------------------
+
+    def test_next_product_order_helper(self):
+        from products.models import next_product_order
+        self.assertEqual(next_product_order(self.category), 1)
+        self._product('A', order=4)
+        self.assertEqual(next_product_order(self.category), 5)
+        self.assertEqual(next_product_order(None), 1)

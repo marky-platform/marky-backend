@@ -1,9 +1,24 @@
 from django.db import models
+from django.db.models import Case, IntegerField, Value, When
 
 from .filters import ProductCategoryFilter, product_has_active_promotion_q
 from .models import Product, ProductCategory
 from .promotions import INACTIVE
 from .serializers import ProductLiteSerializer
+
+
+def product_display_ordering():
+    """Stopper products first (FAVORITE, then RECOMMENDED), then manual `order`, then id."""
+    return [
+        Case(
+            When(stopper='FAVORITE', then=Value(0)),
+            When(stopper='RECOMMENDED', then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        ),
+        'order',
+        'id',
+    ]
 
 
 def build_catalog_payload(*, business, request, query_params, paginator=None,
@@ -36,6 +51,7 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
     products_base = Product.objects.filter(business=business)
     if product_queryset is not None:
         products_base = products_base & product_queryset
+    products_base = products_base.order_by(*product_display_ordering())
 
     if has_promotion:
         promo_products = products_base.filter(product_has_active_promotion_q())
@@ -46,12 +62,13 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
         )
     else:
         products_count = products_base.filter(category__in=filtered_qs).count()
-        if product_queryset is not None:
-            # Scope the prefetched products the same way (e.g. is_active=True)
-            # rather than every product in the category, mirroring has_promotion above.
-            filtered_qs = filtered_qs.prefetch_related(
-                models.Prefetch('products', queryset=products_base)
-            )
+        # Always prefetch so products come back in display order. When
+        # `product_queryset` is set this also scopes them the same way
+        # (e.g. is_active=True) rather than every product in the category,
+        # mirroring has_promotion above.
+        filtered_qs = filtered_qs.prefetch_related(
+            models.Prefetch('products', queryset=products_base)
+        )
 
     # Products without a category aren't included in filtered_qs (there's no
     # ProductCategory row for them), so products_count must account for them

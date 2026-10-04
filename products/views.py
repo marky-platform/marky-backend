@@ -16,7 +16,7 @@ from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
 from .filters import ProductCategoryFilter, product_has_active_promotion_q
 from .models import ProductCategory, ProductVariant, ProductAddon
-from .models import Product
+from .models import Product, next_product_order
 from .services import handle_expired_promotions_for_business
 from .catalog import build_catalog_payload
 from .serializers import (
@@ -26,6 +26,7 @@ from .serializers import (
     ProductInputSerializer,
     PromotionSerializer,
     ProductCategoryOrderUpdateSerializer,
+    ProductOrderUpdateSerializer,
 )
 
 
@@ -104,6 +105,41 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 
         return Response({'status': 'Order updated successfully'}, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        request=ProductOrderUpdateSerializer,
+        responses={200: None},
+        tags=['Products'],
+    )
+    @action(detail=True, methods=['post'], serializer_class=ProductOrderUpdateSerializer)
+    def update_products_order(self, request, pk=None):
+        """Persist the manual order of every product in this category.
+
+        The list must contain exactly the category's current product ids, so a
+        stale client (e.g. a product added from another tab) can't silently
+        mis-order anything.
+        """
+        category = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        product_ids = serializer.validated_data['product_ids']
+
+        products = {p.id: p for p in Product.objects.filter(category=category)}
+        if len(set(product_ids)) != len(product_ids) or set(product_ids) != set(products):
+            return Response(
+                {'error': 'La lista de productos cambió. Actualiza la página e inténtalo de nuevo.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ordered = []
+        for index, product_id in enumerate(product_ids, start=1):
+            product = products[product_id]
+            product.order = index
+            ordered.append(product)
+        with transaction.atomic():
+            Product.objects.bulk_update(ordered, ['order'])
+
+        return Response({'status': 'Products order updated successfully'}, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'], serializer_class=PromotionSerializer)
     def add_promotion(self, request, pk=None):
         category = self.get_object()
@@ -150,4 +186,13 @@ class ProductViewSet(viewsets.ModelViewSet):
         return Product.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(business=self.request.user.business_profile)
+        category = serializer.validated_data.get('category')
+        extra = {'order': next_product_order(category)} if category is not None else {}
+        serializer.save(business=self.request.user.business_profile, **extra)
+
+    def perform_update(self, serializer):
+        new_category = serializer.validated_data.get('category', serializer.instance.category)
+        if new_category is not None and new_category != serializer.instance.category:
+            serializer.save(order=next_product_order(new_category))
+        else:
+            serializer.save()
