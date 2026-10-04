@@ -4,6 +4,7 @@ from rest_framework import serializers
 from django.db import transaction, IntegrityError
 from decimal import Decimal
 
+from . import product_extras
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia
 from .validators import validate_media_extension, validate_media_size
 from .promotions import (
@@ -322,6 +323,7 @@ class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
             'stopper', 'multibuy_option', 'discount_percentage', 'is_available',
             'promotion_starts_at', 'promotion_ends_at', 'promotion_status', 'business',
             'variants', 'addons', 'media',
+            'featured_ingredients', 'presentation', 'allergens', 'celiac_info',
             # Human-readable prices for the business context
             'primary_price', 'secondary_price',
             # Human-readable discounted prices
@@ -526,6 +528,18 @@ class ProductCategoryOrderUpdateSerializer(serializers.Serializer):
     categories = ProductCategoryOrderSerializer(many=True)
 
 
+class RawJSONField(serializers.JSONField):
+    """JSONField that hands the raw multipart value to validate_<field>.
+
+    DRF's default wraps HTML-form values in a JSONString (and would turn a
+    normalized None into the string "None"); the validators in
+    product_extras parse JSON strings themselves.
+    """
+
+    def get_value(self, dictionary):
+        return dictionary.get(self.field_name, serializers.empty)
+
+
 class ProductInputSerializer(serializers.ModelSerializer):
     variants = ProductVariantInputSerializer(many=True, required=False)
     addons = ProductAddonInputSerializer(many=True, required=False)
@@ -535,6 +549,11 @@ class ProductInputSerializer(serializers.ModelSerializer):
         queryset=ProductCategory.objects.none(), required=False, allow_null=True
     )
 
+    featured_ingredients = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    allergens = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    presentation = RawJSONField(required=False, allow_null=True)
+    celiac_info = RawJSONField(required=False, allow_null=True)
+
     class Meta:
         model = Product
         fields = [
@@ -542,6 +561,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
             'stopper', 'multibuy_option', 'discount_percentage',
             'promotion_starts_at', 'promotion_ends_at',
             'variants', 'addons', 'media', 'is_available',
+            'featured_ingredients', 'presentation', 'allergens', 'celiac_info',
         ]
 
     def __init__(self, *args, **kwargs):
@@ -561,7 +581,12 @@ class ProductInputSerializer(serializers.ModelSerializer):
     # converted to None the way a real JSON `null` would be. Normalize that
     # deterministically here rather than relying on DRF's HTML-form
     # empty-string convention, which only fires for genuine QueryDicts.
-    _CLEARABLE_PROMOTION_FIELDS = ('multibuy_option', 'promotion_starts_at', 'promotion_ends_at')
+    _CLEARABLE_PROMOTION_FIELDS = (
+        'multibuy_option', 'promotion_starts_at', 'promotion_ends_at',
+        'presentation', 'celiac_info',
+    )
+    # Free-text CSV fields: only "" clears ("null"/"none" may be a real value).
+    _CLEARABLE_CSV_FIELDS = ('featured_ingredients', 'allergens')
 
     def to_internal_value(self, data):
         data = data.copy()
@@ -570,7 +595,31 @@ class ProductInputSerializer(serializers.ModelSerializer):
                 raw = data.get(field)
                 if isinstance(raw, str) and raw.strip().lower() in ('', 'null', 'none'):
                     data[field] = None
+        for field in self._CLEARABLE_CSV_FIELDS:
+            if field in data:
+                raw = data.get(field)
+                if isinstance(raw, str) and raw.strip() == '':
+                    data[field] = None
+                # drf_nested_forms (used when bracket keys such as media[0][id]
+                # are in the same request) turns "true"/"false"/"123" into
+                # bool/int; hand the CharField the original-looking text back.
+                elif isinstance(raw, bool):
+                    data[field] = 'true' if raw else 'false'
+                elif isinstance(raw, int):
+                    data[field] = str(raw)
         return super().to_internal_value(data)
+
+    def validate_featured_ingredients(self, value):
+        return product_extras.normalize_featured_ingredients(value)
+
+    def validate_allergens(self, value):
+        return product_extras.normalize_allergens(value)
+
+    def validate_presentation(self, value):
+        return product_extras.validate_presentation(value)
+
+    def validate_celiac_info(self, value):
+        return product_extras.validate_celiac_info(value)
 
     STOPPER_CONFLICT_LABELS = {
         'FAVORITE': 'Favorito del mes',

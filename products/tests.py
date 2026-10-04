@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -2156,3 +2157,214 @@ class TestPublicCatalogAndProductAPI(MarkyAPITestCase):
         self.assertEqual(response.status_code, 200)
         category_ids = [category['id'] for category in response.data['results']]
         self.assertNotIn(hidden_promo_category.id, category_ids)
+
+
+class TestProductExtraFields(MarkyAPITestCase):
+    """Featured ingredients, presentation, allergens and SIN TACC (celiac_info)."""
+
+    URL = '/api/v1/products/products/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('extras_user', 'extras@test.com')
+
+    def _create(self, **extra):
+        payload = {'name': 'P', 'description': 'D', 'price': '10.00'}
+        payload.update(extra)
+        return self.auth_client(self.user).post(self.URL, payload, format='multipart')
+
+    def _patch(self, product, **data):
+        return self.auth_client(self.user).patch(
+            f'{self.URL}{product.id}/', data, format='multipart',
+        )
+
+    def _product(self, **kwargs):
+        return Product.objects.create(
+            name='P', description='D', price=Decimal('10.00'), business=self.profile, **kwargs
+        )
+
+    def test_create_without_new_fields_defaults_to_null(self):
+        response = self._create()
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.latest('id')
+        self.assertIsNone(product.featured_ingredients)
+        self.assertIsNone(product.presentation)
+        self.assertIsNone(product.allergens)
+        self.assertIsNone(product.celiac_info)
+
+    def test_existing_product_serializes_null_fields(self):
+        product = self._product()
+        response = self.auth_client(self.user).get(f'{self.URL}{product.id}/')
+        self.assertEqual(response.status_code, 200)
+        for field in ('featured_ingredients', 'presentation', 'allergens', 'celiac_info'):
+            self.assertIsNone(response.data[field])
+
+    def test_create_with_all_fields(self):
+        presentation = {
+            'version': 1,
+            'amount': {'type': 'weight', 'value': 1.5, 'unit': 'kg'},
+            'dimensions': {'shape': 'round', 'diameterCm': 22, 'lengthCm': None,
+                           'widthCm': None, 'heightCm': 8},
+            'approximateYield': {'minPeople': 12, 'maxPeople': 15},
+        }
+        celiac = {'version': 1, 'crossContaminationControl': True,
+                  'glutenFreeGrains': False, 'certifiedProtocol': True}
+        response = self._create(
+            featured_ingredients='Tomate,Albahaca',
+            allergens='egg,milk',
+            presentation=json.dumps(presentation),
+            celiac_info=json.dumps(celiac),
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.latest('id')
+        self.assertEqual(product.featured_ingredients, 'Tomate,Albahaca')
+        self.assertEqual(product.allergens, 'milk,egg')  # canonical catalog order
+        self.assertEqual(product.presentation, presentation)
+        self.assertEqual(product.celiac_info, celiac)
+        self.assertEqual(response.data['presentation']['amount']['value'], 1.5)
+
+    def test_clear_with_empty_string(self):
+        product = self._product(
+            featured_ingredients='A', allergens='milk',
+            presentation={'version': 1, 'amount': None, 'dimensions': None,
+                          'approximateYield': {'minPeople': 2, 'maxPeople': None}},
+            celiac_info={'version': 1, 'crossContaminationControl': True,
+                         'glutenFreeGrains': True, 'certifiedProtocol': True},
+        )
+        response = self._patch(
+            product, featured_ingredients='', allergens='', presentation='', celiac_info='',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        self.assertIsNone(product.featured_ingredients)
+        self.assertIsNone(product.allergens)
+        self.assertIsNone(product.presentation)
+        self.assertIsNone(product.celiac_info)
+
+    def test_omitted_fields_are_preserved_on_patch(self):
+        product = self._product(featured_ingredients='A,B', allergens='soy')
+        response = self._patch(product, price='12.00')
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        self.assertEqual(product.featured_ingredients, 'A,B')
+        self.assertEqual(product.allergens, 'soy')
+
+    def test_ingredients_rules(self):
+        self.assertEqual(self._create(featured_ingredients='a,A').status_code, 400)
+        self.assertEqual(self._create(featured_ingredients=','.join(str(i) for i in range(9))).status_code, 400)
+        self.assertEqual(self._create(featured_ingredients='a,,b').status_code, 400)
+        ok = self._create(featured_ingredients=','.join(str(i) for i in range(8)))
+        self.assertEqual(ok.status_code, 201, ok.data)
+
+    def test_unknown_allergen_rejected(self):
+        response = self._create(allergens='milk,kryptonite')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('allergens', response.data)
+
+    def _presentation(self, **overrides):
+        base = {'version': 1, 'amount': None, 'dimensions': None, 'approximateYield': None}
+        base.update(overrides)
+        return json.dumps(base)
+
+    def test_invalid_presentation_payloads(self):
+        bad = [
+            {'amount': {'type': 'units', 'value': 0, 'unit': None}},
+            {'amount': {'type': 'units', 'value': 1.5, 'unit': None}},
+            {'amount': {'type': 'units', 'value': 2, 'unit': 'g'}},
+            {'amount': {'type': 'weight', 'value': 2, 'unit': 'ml'}},
+            {'amount': {'type': 'weight', 'value': -1, 'unit': 'g'}},
+            {'amount': {'type': 'bogus', 'value': 1, 'unit': None}},
+            {'amount': {'type': 'weight', 'value': '1', 'unit': 'g'}},
+            {'dimensions': {'shape': 'round', 'diameterCm': None, 'heightCm': None}},
+            {'dimensions': {'shape': 'round', 'diameterCm': 10, 'lengthCm': 5}},
+            {'dimensions': {'shape': 'rectangular', 'lengthCm': 10}},
+            {'dimensions': {'shape': 'round', 'diameterCm': 10, 'heightCm': 0}},
+            {'approximateYield': {'minPeople': 0, 'maxPeople': None}},
+            {'approximateYield': {'minPeople': 5, 'maxPeople': 4}},
+            {'approximateYield': {'minPeople': 5, 'extra': 1}},
+        ]
+        for overrides in bad:
+            with self.subTest(overrides=overrides):
+                response = self._create(presentation=self._presentation(**overrides))
+                self.assertEqual(response.status_code, 400, overrides)
+                self.assertIn('presentation', response.data)
+
+    def test_presentation_malformed_json_and_unknown_keys(self):
+        self.assertEqual(self._create(presentation='{not json').status_code, 400)
+        self.assertEqual(self._create(presentation=json.dumps({'version': 2})).status_code, 400)
+        self.assertEqual(
+            self._create(presentation=json.dumps({'version': 1, 'foo': 1})).status_code, 400
+        )
+
+    def test_celiac_validation(self):
+        full = {'version': 1, 'crossContaminationControl': False,
+                'glutenFreeGrains': False, 'certifiedProtocol': False}
+        ok = self._create(celiac_info=json.dumps(full))
+        self.assertEqual(ok.status_code, 201, ok.data)  # enabled with zero declarations allowed
+        for bad in (
+            {**full, 'glutenFreeGrains': 'yes'},
+            {**full, 'extra': True},
+            {'version': 1, 'crossContaminationControl': True},
+            {**full, 'version': 2},
+        ):
+            with self.subTest(bad=bad):
+                self.assertEqual(self._create(celiac_info=json.dumps(bad)).status_code, 400)
+
+    def test_presentation_hostile_payloads_return_400_not_500(self):
+        hostile = [
+            {'version': 1, 'amount': {'type': [], 'value': 1, 'unit': None}},
+            {'version': 1, 'dimensions': {'shape': {}}},
+            {'version': 1, 'amount': {'type': 'weight', 'value': 10 ** 400, 'unit': 'g'}},
+            {'version': 1, 'amount': {'type': 'weight', 'value': 1e308, 'unit': 'g'}},
+            {'version': 1, 'dimensions': {'shape': 'round', 'diameterCm': 1e-320}},
+            {'version': 1, 'approximateYield': {'minPeople': 10 ** 30, 'maxPeople': None}},
+            {'version': True},
+        ]
+        for payload in hostile:
+            with self.subTest(payload=str(payload)[:60]):
+                response = self._create(presentation=json.dumps(payload))
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._create(presentation='[' * 100000).status_code, 400)
+        self.assertEqual(self._create(presentation='[]').status_code, 400)
+
+    def test_ingredient_named_null_is_stored_not_cleared(self):
+        response = self._create(featured_ingredients='Null')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Product.objects.latest('id').featured_ingredients, 'Null')
+
+    def test_new_fields_work_when_request_also_has_nested_keys(self):
+        # Bracket keys make drf_nested_forms coerce "true"/"123" etc.
+        response = self._create(
+            featured_ingredients='true',
+            allergens='milk',
+            presentation=json.dumps({
+                'version': 1, 'amount': None, 'dimensions': None,
+                'approximateYield': {'minPeople': 3, 'maxPeople': None},
+            }),
+            celiac_info='',
+            **{'addons[0][name]': 'Extra', 'addons[0][price]': '1.00'},
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.latest('id')
+        self.assertEqual(product.featured_ingredients, 'true')
+        self.assertEqual(product.allergens, 'milk')
+        self.assertEqual(product.presentation['approximateYield']['minPeople'], 3)
+        self.assertIsNone(product.celiac_info)
+
+    def test_put_without_new_fields_is_accepted(self):
+        product = self._product()
+        response = self.auth_client(self.user).put(
+            f'{self.URL}{product.id}/',
+            {'name': 'P2', 'description': 'D', 'price': '10.00'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_category_empty_string_clears_category_on_patch(self):
+        category = ProductCategory.objects.create(name='Bebidas', business=self.profile)
+        product = self._product(category=category)
+        response = self._patch(product, category='')
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        self.assertIsNone(product.category)

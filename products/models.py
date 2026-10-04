@@ -73,6 +73,19 @@ class Product(models.Model):
     )
     promotion_starts_at = models.DateTimeField(null=True, blank=True)
     promotion_ends_at = models.DateTimeField(null=True, blank=True)
+    # optional informational metadata
+    featured_ingredients = models.TextField(
+        null=True, blank=True, help_text="Ingredientes destacados separados por coma (máx. 8)"
+    )
+    presentation = models.JSONField(
+        null=True, blank=True, help_text="Presentación: cantidad, dimensiones y rendimiento (versionado)"
+    )
+    allergens = models.TextField(
+        null=True, blank=True, help_text="Identificadores de alérgenos separados por coma"
+    )
+    celiac_info = models.JSONField(
+        null=True, blank=True, help_text="Declaraciones SIN TACC; null = desactivado"
+    )
     #
     business = models.ForeignKey(BusinessProfile, on_delete=models.CASCADE, related_name='products')
 
