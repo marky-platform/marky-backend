@@ -1,8 +1,10 @@
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from .models import ProductAddon, ProductVariant
+from .product_extras import validate_celiac_info, validate_presentation
 from .promotions import resolve_effective_promotion, ACTIVE as PROMOTION_ACTIVE
 from .serializers import (
     ProductPriceMixin,
@@ -41,7 +43,9 @@ class PublicProductSerializer(ProductPriceMixin, serializers.Serializer):
     edit form. Mirrors ProductLiteSerializer's resolved-promotion fields
     (product overrides category, via resolve_effective_promotion) and adds
     `stopper`, `category` (id + name only), full `media`, `variants` and
-    `addons` with explicit field lists.
+    `addons` with explicit field lists, plus the descriptive extras
+    (`featured_ingredients`, `presentation`, `allergens`, `celiac_info`) in the
+    same raw shape the admin serializer emits.
     """
     id = serializers.IntegerField(read_only=True)
     name = serializers.CharField(read_only=True)
@@ -53,6 +57,10 @@ class PublicProductSerializer(ProductPriceMixin, serializers.Serializer):
     media = ProductMediaSerializer(many=True, read_only=True)
     variants = PublicProductVariantSerializer(many=True, read_only=True)
     addons = PublicProductAddonSerializer(many=True, read_only=True)
+    featured_ingredients = serializers.CharField(read_only=True, allow_null=True)
+    allergens = serializers.CharField(read_only=True, allow_null=True)
+    presentation = serializers.SerializerMethodField()
+    celiac_info = serializers.SerializerMethodField()
 
     multibuy_option = serializers.SerializerMethodField()
     discount_percentage = serializers.SerializerMethodField()
@@ -63,6 +71,23 @@ class PublicProductSerializer(ProductPriceMixin, serializers.Serializer):
     secondary_price = serializers.SerializerMethodField()
     primary_price_with_discount = serializers.SerializerMethodField()
     secondary_price_with_discount = serializers.SerializerMethodField()
+
+    @staticmethod
+    def _sanitized(validator, value):
+        """Re-run the write-side validator so a row edited outside the API
+        (Django admin, SQL) can never leak a malformed shape publicly."""
+        if value is None:
+            return None
+        try:
+            return validator(value)
+        except (DjangoValidationError, serializers.ValidationError):
+            return None
+
+    def get_presentation(self, obj):
+        return self._sanitized(validate_presentation, obj.presentation)
+
+    def get_celiac_info(self, obj):
+        return self._sanitized(validate_celiac_info, obj.celiac_info)
 
     def _get_promotion_bundle(self, obj):
         cache = self.context.setdefault('_promotion_cache', {})

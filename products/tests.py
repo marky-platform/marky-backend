@@ -2158,6 +2158,68 @@ class TestPublicCatalogAndProductAPI(MarkyAPITestCase):
         category_ids = [category['id'] for category in response.data['results']]
         self.assertNotIn(hidden_promo_category.id, category_ids)
 
+    def _public_detail(self, product):
+        response = self.client.get(
+            f'/api/v1/public/business/{self.profile.business_id}/products/{product.id}/'
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_public_detail_exposes_descriptive_extras(self):
+        product = Product.objects.create(
+            name='Torta', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, is_active=True,
+            featured_ingredients='Chocolate,Dulce de leche',
+            allergens='milk,egg',
+            presentation={
+                'version': 1,
+                'amount': {'type': 'weight', 'value': 1.5, 'unit': 'kg'},
+                'dimensions': {'shape': 'round', 'diameterCm': 22},
+                'approximateYield': {'minPeople': 12, 'maxPeople': 15},
+            },
+            celiac_info={
+                'version': 1,
+                'crossContaminationControl': True,
+                'glutenFreeGrains': False,
+                'certifiedProtocol': True,
+            },
+        )
+
+        data = self._public_detail(product)
+
+        self.assertEqual(data['featured_ingredients'], 'Chocolate,Dulce de leche')
+        self.assertEqual(data['allergens'], 'milk,egg')
+        self.assertEqual(data['presentation']['amount'], {'type': 'weight', 'value': 1.5, 'unit': 'kg'})
+        self.assertEqual(data['presentation']['approximateYield'], {'minPeople': 12, 'maxPeople': 15})
+        self.assertTrue(data['celiac_info']['crossContaminationControl'])
+        self.assertFalse(data['celiac_info']['glutenFreeGrains'])
+
+    def test_public_detail_returns_nulls_for_legacy_products(self):
+        data = self._public_detail(self.visible_product)
+
+        for field in ('featured_ingredients', 'allergens', 'presentation', 'celiac_info'):
+            self.assertIn(field, data)
+            self.assertIsNone(data[field])
+
+    def test_public_detail_nulls_malformed_json_extras(self):
+        product = Product.objects.create(
+            name='Hand edited', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category, is_active=True,
+            presentation={'version': 7, 'amount': 'lots'},
+            celiac_info={'version': 1, 'crossContaminationControl': 'yes'},
+        )
+
+        data = self._public_detail(product)
+
+        self.assertIsNone(data['presentation'])
+        self.assertIsNone(data['celiac_info'])
+
+    def test_public_detail_still_hides_admin_only_fields(self):
+        data = self._public_detail(self.visible_product)
+
+        for field in ('business', 'is_active', 'order'):
+            self.assertNotIn(field, data)
+
 
 class TestProductExtraFields(MarkyAPITestCase):
     """Featured ingredients, presentation, allergens and SIN TACC (celiac_info)."""
