@@ -1292,6 +1292,40 @@ class TestResolveEffectivePromotion(SimpleTestCase):
         self.assertEqual(bundle['status'], EXPIRED)
         self.assertEqual(bundle['discount_percentage'], Decimal('5.00'))
 
+    def test_active_product_multibuy_wins_over_active_category_discount(self):
+        now = timezone.now()
+        category = self._category(
+            discount_percentage=Decimal('30.00'),
+            starts_at=now - timedelta(hours=2), ends_at=now + timedelta(hours=2),
+        )
+        product = self._product(
+            category=category, multibuy_option='3x2',
+            starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
+        )
+
+        bundle = resolve_effective_promotion(product, now=now)
+
+        self.assertEqual(bundle['source'], 'product')
+        self.assertEqual(bundle['multibuy_option'], '3x2')
+        self.assertEqual(bundle['discount_percentage'], Decimal('0'))
+
+    def test_active_product_discount_wins_over_active_category_multibuy(self):
+        now = timezone.now()
+        category = self._category(
+            multibuy_option='3x2',
+            starts_at=now - timedelta(hours=2), ends_at=now + timedelta(hours=2),
+        )
+        product = self._product(
+            category=category, discount_percentage=Decimal('30.00'),
+            starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
+        )
+
+        bundle = resolve_effective_promotion(product, now=now)
+
+        self.assertEqual(bundle['source'], 'product')
+        self.assertEqual(bundle['discount_percentage'], Decimal('30.00'))
+        self.assertFalse(bundle['multibuy_option'])
+
 
 class TestPromotionStatusFilterConsistency(MarkyAPITestCase):
     """compute_promotion_status() and filters.py::_promotion_active_q must
@@ -2655,3 +2689,184 @@ class TestProductManualOrder(MarkyAPITestCase):
         self._product('A', order=4)
         self.assertEqual(next_product_order(self.category), 5)
         self.assertEqual(next_product_order(None), 1)
+
+
+class TestPromotionTypeExclusivity(MarkyAPITestCase):
+    """A single Product/ProductCategory row carries ONE promotion type:
+    a positive discount and a multibuy option are mutually exclusive, and the
+    effective API bundle never mixes the product's and category's types."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('promo_excl_user', 'promo_excl@test.com')
+
+    def setUp(self):
+        self.category = ProductCategory.objects.create(business=self.profile, name='Excl Cat', icon='icon')
+        self.client_api = self.auth_client(self.user)
+
+    def _product(self, **overrides):
+        defaults = dict(
+            name='Excl Product', description='Desc', price=Decimal('10.00'),
+            business=self.profile, category=self.category,
+        )
+        defaults.update(overrides)
+        return Product.objects.create(**defaults)
+
+    def _with_products_card(self, product):
+        response = self.client_api.get('/api/v1/products/product-categories/with_products/')
+        self.assertEqual(response.status_code, 200)
+        data = response.data
+        categories = data['results'] if isinstance(data, dict) and 'results' in data else data
+        for category in categories:
+            for card in category['products']:
+                if card['id'] == product.id:
+                    return card
+        self.fail('product not found in with_products response')
+
+    # --- product writes -------------------------------------------------
+
+    def test_product_create_with_discount_and_multibuy_rejected(self):
+        response = self.client_api.post(
+            '/api/v1/products/products/',
+            {'name': 'Both', 'description': 'Desc', 'price': '10.00',
+             'discount_percentage': '30', 'multibuy_option': '3x2'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('multibuy_option', response.data)
+
+    def test_product_patch_adding_multibuy_without_clearing_discount_rejected(self):
+        product = self._product(discount_percentage=Decimal('30.00'))
+        response = self.client_api.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'multibuy_option': '3x2'}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        product.refresh_from_db()
+        self.assertEqual(product.discount_percentage, Decimal('30.00'))
+        self.assertFalse(product.multibuy_option)
+
+    def test_product_patch_adding_discount_without_clearing_multibuy_rejected(self):
+        product = self._product(multibuy_option='3x2')
+        response = self.client_api.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'discount_percentage': '30'}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_product_switch_discount_to_multibuy_with_clear_accepted(self):
+        product = self._product(discount_percentage=Decimal('30.00'))
+        response = self.client_api.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'multibuy_option': '3x2', 'discount_percentage': '0'}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        self.assertEqual(product.multibuy_option, '3x2')
+        self.assertEqual(product.discount_percentage, Decimal('0'))
+
+    def test_product_switch_multibuy_to_discount_with_clear_accepted(self):
+        product = self._product(multibuy_option='3x2')
+        response = self.client_api.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'discount_percentage': '30', 'multibuy_option': ''}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        product.refresh_from_db()
+        self.assertFalse(product.multibuy_option)
+        self.assertEqual(product.discount_percentage, Decimal('30'))
+
+    def test_unrelated_save_of_legacy_conflicting_row_still_allowed(self):
+        product = self._product(discount_percentage=Decimal('30.00'), multibuy_option='3x2')
+        response = self.client_api.patch(
+            f'/api/v1/products/products/{product.id}/', {'price': '12.00'}, format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_date_only_patch_of_legacy_conflicting_product_allowed(self):
+        now = timezone.now()
+        product = self._product(discount_percentage=Decimal('30.00'), multibuy_option='3x2')
+        response = self.client_api.patch(
+            f'/api/v1/products/products/{product.id}/',
+            {'promotion_starts_at': (now - timedelta(days=2)).isoformat(),
+             'promotion_ends_at': (now - timedelta(days=1)).isoformat()},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_date_only_add_promotion_of_legacy_conflicting_category_allowed(self):
+        now = timezone.now()
+        self.category.discount_percentage = Decimal('30.00')
+        self.category.multibuy_option = '3x2'
+        self.category.save()
+        response = self.client_api.post(
+            f'/api/v1/products/product-categories/{self.category.id}/add_promotion/',
+            {'promotion_starts_at': now.isoformat(),
+             'promotion_ends_at': (now + timedelta(days=1)).isoformat()},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+
+    # --- category writes ------------------------------------------------
+
+    def test_category_add_promotion_mixing_types_rejected(self):
+        self.category.discount_percentage = Decimal('30.00')
+        self.category.save()
+        response = self.client_api.post(
+            f'/api/v1/products/product-categories/{self.category.id}/add_promotion/',
+            {'multibuy_option': '3x2'}, format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('multibuy_option', response.data)
+
+    def test_category_add_promotion_switch_with_clear_accepted(self):
+        self.category.discount_percentage = Decimal('30.00')
+        self.category.save()
+        response = self.client_api.post(
+            f'/api/v1/products/product-categories/{self.category.id}/add_promotion/',
+            {'multibuy_option': '3x2', 'discount_percentage': 0}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.category.refresh_from_db()
+        self.assertEqual(self.category.multibuy_option, '3x2')
+        self.assertEqual(self.category.discount_percentage, Decimal('0'))
+
+    def test_category_patch_mixing_types_rejected(self):
+        self.category.multibuy_option = '3x2'
+        self.category.save()
+        response = self.client_api.patch(
+            f'/api/v1/products/product-categories/{self.category.id}/',
+            {'discount_percentage': '30'}, format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    # --- effective response --------------------------------------------
+
+    def test_effective_response_product_multibuy_over_category_discount(self):
+        now = timezone.now()
+        self.category.discount_percentage = Decimal('30.00')
+        self.category.promotion_starts_at = now - timedelta(hours=1)
+        self.category.promotion_ends_at = now + timedelta(days=1)
+        self.category.save()
+        product = self._product(
+            multibuy_option='3x2',
+            promotion_starts_at=now - timedelta(hours=1), promotion_ends_at=now + timedelta(days=1),
+        )
+        card = self._with_products_card(product)
+        self.assertEqual(card['multibuy_option'], '3x2')
+        self.assertEqual(Decimal(str(card['discount_percentage'])), Decimal('0'))
+
+    def test_effective_response_product_discount_over_category_multibuy(self):
+        now = timezone.now()
+        self.category.multibuy_option = '3x2'
+        self.category.promotion_starts_at = now - timedelta(hours=1)
+        self.category.promotion_ends_at = now + timedelta(days=1)
+        self.category.save()
+        product = self._product(
+            discount_percentage=Decimal('30.00'),
+            promotion_starts_at=now - timedelta(hours=1), promotion_ends_at=now + timedelta(days=1),
+        )
+        card = self._with_products_card(product)
+        self.assertEqual(Decimal(str(card['discount_percentage'])), Decimal('30'))
+        self.assertFalse(card['multibuy_option'])

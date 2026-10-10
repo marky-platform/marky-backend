@@ -8,6 +8,8 @@ from . import product_extras
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia
 from .validators import validate_media_extension, validate_media_size
 from .promotions import (
+    PROMOTION_TYPE_CONFLICT_MESSAGE,
+    promotion_type_conflict,
     resolve_effective_promotion,
     compute_promotion_status,
     ACTIVE as PROMOTION_ACTIVE,
@@ -292,6 +294,18 @@ class ProductCategoryBasicSerializer(serializers.ModelSerializer):
             obj.promotion_starts_at, obj.promotion_ends_at,
         )
 
+    def validate(self, attrs):
+        # One promotion type per row. Only evaluated when this request touches
+        # a type field, so an unrelated save of a legacy row still goes through.
+        if 'multibuy_option' in attrs or 'discount_percentage' in attrs:
+            multibuy_option = attrs.get('multibuy_option', getattr(self.instance, 'multibuy_option', None))
+            discount_percentage = attrs.get('discount_percentage', getattr(self.instance, 'discount_percentage', None))
+            if promotion_type_conflict(multibuy_option, discount_percentage):
+                raise serializers.ValidationError({
+                    'multibuy_option': PROMOTION_TYPE_CONFLICT_MESSAGE
+                })
+        return attrs
+
 
 class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
     primary_price = serializers.SerializerMethodField()
@@ -511,6 +525,13 @@ class PromotionSerializer(serializers.ModelSerializer):
             starts_at = attrs.get('promotion_starts_at', getattr(self.instance, 'promotion_starts_at', None))
             ends_at = attrs.get('promotion_ends_at', getattr(self.instance, 'promotion_ends_at', None))
             has_type = bool(multibuy_option) or (discount_percentage is not None and discount_percentage > 0)
+            # Only when this request touches a type field: a date-only edit of
+            # a legacy row must still be able to go through.
+            type_touched = 'multibuy_option' in attrs or 'discount_percentage' in attrs
+            if type_touched and promotion_type_conflict(multibuy_option, discount_percentage):
+                raise serializers.ValidationError({
+                    'multibuy_option': PROMOTION_TYPE_CONFLICT_MESSAGE
+                })
             has_dates = bool(starts_at) or bool(ends_at)
             if has_dates and not has_type:
                 raise serializers.ValidationError({
@@ -697,6 +718,13 @@ class ProductInputSerializer(serializers.ModelSerializer):
             multibuy_option = attrs.get('multibuy_option', getattr(self.instance, 'multibuy_option', None))
             discount_percentage = attrs.get('discount_percentage', getattr(self.instance, 'discount_percentage', None))
             has_type = bool(multibuy_option) or (discount_percentage is not None and discount_percentage > 0)
+            # Only when this request touches a type field: a date-only edit of
+            # a legacy row must still be able to go through.
+            type_touched = 'multibuy_option' in attrs or 'discount_percentage' in attrs
+            if type_touched and promotion_type_conflict(multibuy_option, discount_percentage):
+                raise serializers.ValidationError({
+                    'multibuy_option': PROMOTION_TYPE_CONFLICT_MESSAGE
+                })
             has_dates = bool(starts_at) or bool(ends_at)
             if has_dates and not has_type:
                 raise serializers.ValidationError({

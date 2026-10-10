@@ -25,6 +25,18 @@ def has_promotion_configured(multibuy_option, discount_percentage):
     return bool(multibuy_option) or (discount_percentage is not None and discount_percentage > 0)
 
 
+PROMOTION_TYPE_CONFLICT_MESSAGE = (
+    'Una promoción solo puede ser Descuento u Oferta, no ambas a la vez.'
+)
+
+
+def promotion_type_conflict(multibuy_option, discount_percentage):
+    """True when one row carries BOTH a multibuy option and a positive discount."""
+    return has_promotion_configured(multibuy_option, None) and has_promotion_configured(
+        None, discount_percentage
+    )
+
+
 def compute_promotion_status(multibuy_option, discount_percentage, starts_at, ends_at, now=None):
     """Return 'active' | 'scheduled' | 'expired' | 'inactive' for one set of promo fields.
 
