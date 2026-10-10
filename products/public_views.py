@@ -22,6 +22,8 @@ def _active_products():
         OpenApiParameter(name='name', description='Filter by category name (case-insensitive)', required=False, type=OpenApiTypes.STR),
         OpenApiParameter(name='ids', description='Filter by a comma-separated list of category IDs', required=False, type=OpenApiTypes.STR),
         OpenApiParameter(name='has_promotion', description='Filter for categories with active promotions', required=False, type=OpenApiTypes.BOOL),
+        OpenApiParameter(name='has_featured', description='Only products marked as Favorite or Recommended', required=False, type=OpenApiTypes.BOOL),
+        OpenApiParameter(name='include_counts', description='Include filter_counts ({promotion, featured}) in the response', required=False, type=OpenApiTypes.BOOL),
     ],
     responses={200: ProductCategoryWithProductsSerializer(many=True)},
 )

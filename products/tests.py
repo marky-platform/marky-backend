@@ -314,6 +314,120 @@ class TestWithProductsPromotionFilter(MarkyAPITestCase):
         )
 
 
+class TestWithProductsFeaturedFilter(MarkyAPITestCase):
+    """has_featured=true keeps only FAVORITE/RECOMMENDED products; combined with
+    has_promotion the same product must satisfy both."""
+
+    URL = '/api/v1/products/product-categories/with_products/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('featured_user', 'featured@test.com')
+
+        def make(name, category, **kwargs):
+            return Product.objects.create(
+                name=name, description='Desc', price=Decimal('3.00'),
+                business=cls.profile, category=category, **kwargs,
+            )
+
+        # Favorite + Recommended + a plain one + a promoted-only one.
+        cls.cat_a = ProductCategory.objects.create(business=cls.profile, name='A', icon='icon')
+        cls.fav = make('Fav', cls.cat_a, stopper='FAVORITE')
+        cls.rec = make('Rec', cls.cat_a, stopper='RECOMMENDED')
+        cls.plain = make('Plain', cls.cat_a)
+        cls.promo_only = make('PromoOnly', cls.cat_a, discount_percentage=Decimal('20.00'))
+
+        # Featured product that is also on promotion.
+        cls.cat_b = ProductCategory.objects.create(business=cls.profile, name='B', icon='icon')
+        cls.fav_promo = make('FavPromo', cls.cat_b, stopper='FAVORITE', discount_percentage=Decimal('10.00'))
+
+        # One promoted product and a different featured product: the category
+        # must NOT match the combined filter.
+        cls.cat_c = ProductCategory.objects.create(business=cls.profile, name='C', icon='icon')
+        cls.c_promo = make('CPromo', cls.cat_c, discount_percentage=Decimal('15.00'))
+        cls.c_fav = make('CFav', cls.cat_c, stopper='FAVORITE')
+
+        # Featured product inheriting its promotion from the category.
+        cls.cat_d = ProductCategory.objects.create(
+            business=cls.profile, name='D', icon='icon', discount_percentage=Decimal('5.00'),
+        )
+        cls.d_rec = make('DRec', cls.cat_d, stopper='RECOMMENDED')
+        cls.d_plain = make('DPlain', cls.cat_d)
+
+        # No featured products at all.
+        cls.cat_e = ProductCategory.objects.create(business=cls.profile, name='E', icon='icon')
+        make('EPlain', cls.cat_e)
+
+        # Uncategorized featured + plain product.
+        cls.u_fav = make('UFav', None, stopper='FAVORITE')
+        make('UPlain', None)
+
+    def _get(self, **params):
+        response = self.auth_client(self.user).get(self.URL, params)
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    @staticmethod
+    def _by_category(data):
+        return {c['name']: {p['id'] for p in c['products']} for c in data['results']}
+
+    def test_featured_only_returns_favorite_and_recommended(self):
+        data = self._get(has_featured='true')
+        cats = self._by_category(data)
+        self.assertEqual(cats['A'], {self.fav.id, self.rec.id})
+        self.assertEqual(cats['B'], {self.fav_promo.id})
+        self.assertEqual(cats['C'], {self.c_fav.id})
+        self.assertEqual(cats['D'], {self.d_rec.id})
+        self.assertEqual(cats['Sin categoría'], {self.u_fav.id})
+
+    def test_featured_removes_categories_without_featured_products(self):
+        cats = self._by_category(self._get(has_featured='true'))
+        self.assertNotIn('E', cats)
+
+    def test_featured_products_count_includes_uncategorized(self):
+        # fav, rec, fav_promo, c_fav, d_rec, u_fav
+        self.assertEqual(self._get(has_featured='true')['products_count'], 6)
+
+    def test_featured_keeps_display_order(self):
+        data = self._get(has_featured='true')
+        a = next(c for c in data['results'] if c['name'] == 'A')
+        self.assertEqual([p['id'] for p in a['products']], [self.fav.id, self.rec.id])
+
+    def test_combined_filters_require_both_on_same_product(self):
+        data = self._get(has_featured='true', has_promotion='true')
+        cats = self._by_category(data)
+        self.assertEqual(cats['B'], {self.fav_promo.id})
+        # Inherited category promotion counts as an effective promotion.
+        self.assertEqual(cats['D'], {self.d_rec.id})
+        # Category C has a promoted product and a featured product, but no
+        # single product that is both.
+        self.assertNotIn('C', cats)
+        self.assertNotIn('A', cats)
+        self.assertNotIn('Sin categoría', cats)
+        self.assertEqual(data['products_count'], 2)
+
+    def test_promotion_only_regression(self):
+        data = self._get(has_promotion='true')
+        cats = self._by_category(data)
+        self.assertEqual(cats['A'], {self.promo_only.id})
+        self.assertEqual(cats['C'], {self.c_promo.id})
+        self.assertEqual(cats['D'], {self.d_rec.id, self.d_plain.id})
+
+    def test_absent_and_false_preserve_unfiltered_results(self):
+        absent = self._get()
+        false = self._get(has_featured='false')
+        self.assertEqual(absent['products_count'], false['products_count'])
+        self.assertEqual(self._by_category(absent), self._by_category(false))
+        self.assertEqual(absent['products_count'], 12)
+        self.assertNotIn('filter_counts', absent)
+
+    def test_filter_counts_are_opt_in_and_ignore_toggles(self):
+        data = self._get(include_counts='true', has_featured='true')
+        # promoted: promo_only, fav_promo, c_promo, d_rec, d_plain
+        self.assertEqual(data['filter_counts'], {'promotion': 5, 'featured': 6})
+
+
 class TestWithProductsUncategorizedCount(MarkyAPITestCase):
     """products_count must include products with no category (the synthetic
     'Sin categoría' bucket), not just products belonging to a real
