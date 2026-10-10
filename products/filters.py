@@ -33,14 +33,21 @@ def product_has_active_promotion_q(now=None):
     return _promotion_active_q(now) | _promotion_active_q(now, prefix='category__')
 
 
+def product_is_featured_q():
+    """Q object (for the Product model) matching "featured" products:
+    featured = recommended OR favorite (stopper IN FAVORITE, RECOMMENDED)."""
+    return Q(stopper__in=['FAVORITE', 'RECOMMENDED'])
+
+
 class ProductCategoryFilter(filters.FilterSet):
     name = filters.CharFilter(lookup_expr='icontains')
     ids = NumberInFilter(field_name='id', lookup_expr='in')
     has_promotion = filters.BooleanFilter(method='filter_has_promotion')
+    has_featured = filters.BooleanFilter(method='filter_has_featured')
 
     class Meta:
         model = ProductCategory
-        fields = ['name', 'ids', 'has_promotion']
+        fields = ['name', 'ids', 'has_promotion', 'has_featured']
 
     def __init__(self, *args, product_queryset=None, **kwargs):
         # Scopes the has_promotion Exists subquery below to the same set of
@@ -68,3 +75,17 @@ class ProductCategoryFilter(filters.FilterSet):
                 promotion_conditions | Q(Exists(products_with_promotions))
             ).distinct()
         return queryset
+
+    def filter_has_featured(self, queryset, name, value):
+        if not value:
+            return queryset
+
+        # Evaluated per product: when has_promotion=true is also requested the
+        # same product must be featured AND effectively on promotion, so a
+        # category can't match through two different products.
+        conditions = product_is_featured_q()
+        if self.form.cleaned_data.get('has_promotion'):
+            conditions &= product_has_active_promotion_q()
+
+        matching_products = self.product_queryset.filter(category=OuterRef('pk')).filter(conditions)
+        return queryset.filter(Exists(matching_products))

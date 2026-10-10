@@ -1,7 +1,7 @@
 from django.db import models
-from django.db.models import Case, IntegerField, Value, When
+from django.db.models import Case, IntegerField, Q, Value, When
 
-from .filters import ProductCategoryFilter, product_has_active_promotion_q
+from .filters import ProductCategoryFilter, product_has_active_promotion_q, product_is_featured_q
 from .models import Product, ProductCategory
 from .promotions import INACTIVE
 from .serializers import ProductLiteSerializer
@@ -47,37 +47,53 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
     category_filter = ProductCategoryFilter(query_params, queryset=base_qs, product_queryset=product_queryset)
     filtered_qs = category_filter.qs
     has_promotion = bool(category_filter.form.cleaned_data.get('has_promotion'))
+    has_featured = bool(category_filter.form.cleaned_data.get('has_featured'))
 
     products_base = Product.objects.filter(business=business)
     if product_queryset is not None:
         products_base = products_base & product_queryset
     products_base = products_base.order_by(*product_display_ordering())
 
+    # One final product queryset from every active product-level filter. It
+    # drives the prefetched products, products_count and the uncategorized
+    # bucket, so all three always agree.
+    final_products = products_base
     if has_promotion:
-        promo_products = products_base.filter(product_has_active_promotion_q())
-        products_count = promo_products.filter(category__in=filtered_qs).count()
-        # Only the products that are actually on promotion should be shown within each category
-        filtered_qs = filtered_qs.prefetch_related(
-            models.Prefetch('products', queryset=promo_products)
-        )
-    else:
-        products_count = products_base.filter(category__in=filtered_qs).count()
-        # Always prefetch so products come back in display order. When
-        # `product_queryset` is set this also scopes them the same way
-        # (e.g. is_active=True) rather than every product in the category,
-        # mirroring has_promotion above.
-        filtered_qs = filtered_qs.prefetch_related(
-            models.Prefetch('products', queryset=products_base)
-        )
+        final_products = final_products.filter(product_has_active_promotion_q())
+    if has_featured:
+        final_products = final_products.filter(product_is_featured_q())
+
+    # Always prefetch so products come back in display order. When
+    # `product_queryset` is set this also scopes them the same way
+    # (e.g. is_active=True) rather than every product in the category.
+    filtered_qs = filtered_qs.prefetch_related(
+        models.Prefetch('products', queryset=final_products)
+    )
+    products_count = final_products.filter(category__in=category_filter.qs).count()
 
     # Products without a category aren't included in filtered_qs (there's no
     # ProductCategory row for them), so products_count must account for them
     # separately or a business whose only products are uncategorized would be
     # reported as having zero products.
-    products_without_category = products_base.filter(category__isnull=True)
-    if has_promotion:
-        products_without_category = products_without_category.filter(product_has_active_promotion_q())
+    products_without_category = final_products.filter(category__isnull=True)
     products_count += products_without_category.count()
+
+    # Opt-in (`include_counts=true`) so default responses keep their shape.
+    # Counts ignore the promotion/featured toggles themselves, otherwise
+    # selecting a pill would make the other pills' counts collapse.
+    filter_counts = None
+    if str(query_params.get('include_counts', '')).lower() == 'true':
+        scope_params = query_params.copy()
+        for key in ('has_promotion', 'has_featured'):
+            scope_params.pop(key, None)
+        scope_categories = ProductCategoryFilter(
+            scope_params, queryset=base_qs, product_queryset=product_queryset
+        ).qs
+        scoped = products_base.filter(Q(category__in=scope_categories) | Q(category__isnull=True))
+        filter_counts = {
+            'promotion': scoped.filter(product_has_active_promotion_q()).count(),
+            'featured': scoped.filter(product_is_featured_q()).count(),
+        }
 
     def _serialize(qs):
         serializer = serializer_class(qs, many=True, context={'request': request, 'business_profile': business})
@@ -109,9 +125,14 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
             paginated_response = paginator.get_paginated_response(serialized_data)
             result = paginated_response.data
             result['products_count'] = products_count
+            if filter_counts is not None:
+                result['filter_counts'] = filter_counts
             return result
 
-    return {
+    payload = {
         'products_count': products_count,
         'results': _serialize(filtered_qs)
     }
+    if filter_counts is not None:
+        payload['filter_counts'] = filter_counts
+    return payload
