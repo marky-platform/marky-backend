@@ -303,6 +303,36 @@ class TestWithProductsPromotionFilter(MarkyAPITestCase):
         # promoted_product (Galletas) + inherited_product (Bebidas) = 2
         self.assertEqual(response.data['products_count'], 2)
 
+    def test_blank_multibuy_option_is_not_a_promotion(self):
+        # The product form saves "no offer" as '' rather than NULL; an empty
+        # string must not count as an active promotion in the filter or in
+        # the pill counts.
+        blank_cat = ProductCategory.objects.create(
+            business=self.profile, name='Blank multibuy cat', icon='icon', multibuy_option='',
+        )
+        blank_product = Product.objects.create(
+            name='Blank multibuy', description='Desc', price=Decimal('1.00'),
+            business=self.profile, category=self.cat_mixed, multibuy_option='',
+        )
+        blank_in_blank_cat = Product.objects.create(
+            name='Blank in blank cat', description='Desc', price=Decimal('1.00'),
+            business=self.profile, category=blank_cat, multibuy_option='',
+        )
+
+        client = self.auth_client(self.user)
+        response = client.get(
+            '/api/v1/products/product-categories/with_products/',
+            {'has_promotion': 'true', 'include_counts': 'true'},
+        )
+
+        results = {cat['name']: cat for cat in response.data['results']}
+        self.assertNotIn('Blank multibuy cat', results)
+        shown_ids = {p['id'] for cat in results.values() for p in cat['products']}
+        self.assertNotIn(blank_product.id, shown_ids)
+        self.assertNotIn(blank_in_blank_cat.id, shown_ids)
+        self.assertEqual(response.data['products_count'], 2)
+        self.assertEqual(response.data['filter_counts']['promotion'], 2)
+
     def test_without_filter_all_products_shown(self):
         client = self.auth_client(self.user)
         response = client.get('/api/v1/products/product-categories/with_products/')
