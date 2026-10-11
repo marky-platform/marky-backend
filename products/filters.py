@@ -14,8 +14,11 @@ def _promotion_active_q(now, prefix=''):
     discount = f'{prefix}discount_percentage'
     starts = f'{prefix}promotion_starts_at'
     ends = f'{prefix}promotion_ends_at'
+    # '' (the product form's "no offer") is not a promotion, same as NULL:
+    # mirrors promotions.has_promotion_configured, which uses bool(multibuy).
+    has_multibuy = Q(**{f'{multibuy}__isnull': False}) & ~Q(**{multibuy: ''})
     return (
-        Q(**{f'{multibuy}__isnull': False}) | Q(**{f'{discount}__gt': 0})
+        has_multibuy | Q(**{f'{discount}__gt': 0})
     ) & (
         Q(**{f'{starts}__isnull': True}) | Q(**{f'{starts}__lte': now})
     ) & (
