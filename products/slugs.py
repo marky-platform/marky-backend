@@ -12,6 +12,8 @@ Policy:
 - Collisions resolve deterministically: `base`, `base-2`, `base-3`, ...
 - Names that normalize to an empty slug (emoji, CJK, punctuation only) fall
   back to an id-based slug (`c-<id>` / `p-<id>`).
+- The migration backfill keeps its own frozen copy of these rules
+  (`migrations/_slug_backfill.py`).
 - Uniqueness is enforced by DB constraints (migration 0020); allocation retries
   on IntegrityError so concurrent inserts of the same name both succeed.
 
@@ -19,15 +21,15 @@ This module deliberately imports no models so migrations can use it with
 historical models.
 """
 import uuid
-from collections import defaultdict
-
 from django.db import IntegrityError, router, transaction
-from django.db.models import Q
 from django.utils.text import slugify
 
 SLUG_MAX_LENGTH = 255
 UNCATEGORIZED_SLUG = 'sin-categoria'
-RESERVED_CATEGORY_SLUGS = frozenset({UNCATEGORIZED_SLUG})
+# `product` is the static segment of the legacy `/<business>/product/<id>`
+# route, which the frontend router matches before the canonical one.
+LEGACY_PRODUCT_SEGMENT = 'product'
+RESERVED_CATEGORY_SLUGS = frozenset({UNCATEGORIZED_SLUG, LEGACY_PRODUCT_SEGMENT})
 CATEGORY_FALLBACK_PREFIX = 'c'
 PRODUCT_FALLBACK_PREFIX = 'p'
 MAX_ALLOCATION_ATTEMPTS = 5
@@ -164,43 +166,3 @@ class SlugAllocationMixin:
                 continue
             self._loaded_slug_scope = self._current_slug_scope()
             return
-
-
-def backfill_missing_slugs(category_model, product_model, batch_size=500):
-    """Fill empty slugs in deterministic (business, category, id) order.
-
-    Works with historical models (used by migrations 0019/0020). Existing slugs
-    are kept and count as taken. Returns (categories_filled, products_filled).
-    """
-    empty = Q(slug__isnull=True) | Q(slug='')
-
-    taken = defaultdict(set)
-    for business_id, slug in category_model.objects.exclude(empty).values_list('business_id', 'slug'):
-        taken[business_id].add(slug)
-    categories = list(
-        category_model.objects.filter(empty).order_by('business_id', 'id').only('id', 'business_id', 'name')
-    )
-    for category in categories:
-        base = slugify_name(category.name) or fallback_slug(CATEGORY_FALLBACK_PREFIX, category.id)
-        category.slug = pick_free_slug(base, taken[category.business_id], RESERVED_CATEGORY_SLUGS)
-        taken[category.business_id].add(category.slug)
-    category_model.objects.bulk_update(categories, ['slug'], batch_size=batch_size)
-
-    taken = defaultdict(set)
-    for business_id, category_id, slug in product_model.objects.exclude(empty).values_list(
-        'business_id', 'category_id', 'slug'
-    ):
-        taken[(business_id, category_id)].add(slug)
-    products = list(
-        product_model.objects.filter(empty)
-        .order_by('business_id', 'category_id', 'id')
-        .only('id', 'business_id', 'category_id', 'name')
-    )
-    for product in products:
-        scope = (product.business_id, product.category_id)
-        base = slugify_name(product.name) or fallback_slug(PRODUCT_FALLBACK_PREFIX, product.id)
-        product.slug = pick_free_slug(base, taken[scope])
-        taken[scope].add(product.slug)
-    product_model.objects.bulk_update(products, ['slug'], batch_size=batch_size)
-
-    return len(categories), len(products)

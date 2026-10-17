@@ -1,6 +1,6 @@
 from django.db import migrations
 
-from products.slugs import backfill_missing_slugs
+from products.migrations._slug_backfill import backfill_missing_slugs
 
 
 def backfill_slugs(apps, schema_editor):

@@ -18,7 +18,8 @@ from products.filters import ProductCategoryFilter
 from products.models import Product, ProductCategory, ProductVariant, ProductAddon
 from products.services import handle_expired_promotions_for_business
 from products import slugs as slugs_module
-from products.slugs import SLUG_MAX_LENGTH, backfill_missing_slugs, slugify_name, with_suffix
+from products.migrations._slug_backfill import backfill_missing_slugs
+from products.slugs import SLUG_MAX_LENGTH, slugify_name, with_suffix
 from products.validators import validate_media_extension, validate_media_size
 from products.promotions import (
     compute_promotion_status,
@@ -2581,6 +2582,11 @@ class TestProductSlugs(MarkyAPITestCase):
     def test_sin_categoria_is_reserved_for_uncategorized_products(self):
         self.assertEqual(self._category('Sin categoría').slug, 'sin-categoria-2')
         self.assertEqual(self._category('SIN CATEGORIA').slug, 'sin-categoria-3')
+
+    def test_legacy_product_segment_is_reserved(self):
+        # `/<business>/product/<id>` is the legacy route; a category slug of
+        # `product` would make its canonical links unreachable.
+        self.assertEqual(self._category('Product').slug, 'product-2')
 
     def test_long_names_are_truncated_with_room_for_suffix(self):
         category = self._category('Largos')
