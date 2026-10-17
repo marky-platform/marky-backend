@@ -275,7 +275,7 @@ class ProductVariantInputSerializer(DeletableNestedItemMixin, serializers.ModelS
 class ProductCategoryLiteSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
-        fields = ['id', 'name']
+        fields = ['id', 'name', 'slug']
 
 
 class ProductCategoryBasicSerializer(serializers.ModelSerializer):
@@ -284,7 +284,7 @@ class ProductCategoryBasicSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
         fields = [
-            'id', 'name', 'icon', 'multibuy_option', 'discount_percentage',
+            'id', 'name', 'slug', 'icon', 'multibuy_option', 'discount_percentage',
             'promotion_starts_at', 'promotion_ends_at', 'promotion_status', 'is_available'
         ]
 
@@ -331,7 +331,7 @@ class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'description', 'price', 'category', 'is_active',
+            'id', 'name', 'slug', 'description', 'price', 'category', 'is_active',
             'category_multibuy_option', 'category_discount_percentage', 'category_promotion_starts_at', 'category_promotion_ends_at',
             'category_promotion_status',
             'stopper', 'multibuy_option', 'discount_percentage', 'is_available',
@@ -379,7 +379,7 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ['id', 'name', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
+        fields = ['id', 'name', 'slug', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
                   'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at',
                   'promotion_status', 'is_available',
                   'primary_price', 'secondary_price',
@@ -495,7 +495,7 @@ class ProductCategoryWithProductsSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
         fields = [
-            'id', 'name', 'icon', 'multibuy_option', 'discount_percentage',
+            'id', 'name', 'slug', 'icon', 'multibuy_option', 'discount_percentage',
             'promotion_starts_at', 'promotion_ends_at', 'promotion_status', 'is_available', 'products'
         ]
 

@@ -5,6 +5,7 @@ from .filters import ProductCategoryFilter, product_has_active_promotion_q, prod
 from .models import Product, ProductCategory
 from .promotions import INACTIVE
 from .serializers import ProductLiteSerializer
+from .slugs import UNCATEGORIZED_SLUG
 
 
 def product_display_ordering():
@@ -106,6 +107,7 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
             no_category_data = {
                 'id': None,
                 'name': 'Sin categoría',
+                'slug': UNCATEGORIZED_SLUG,
                 'icon': 'fa-question-circle',
                 'multibuy_option': None,
                 'discount_percentage': 0,

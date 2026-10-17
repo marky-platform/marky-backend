@@ -36,19 +36,21 @@ class PublicProductAddonSerializer(ProductPriceMixin, serializers.ModelSerialize
 class PublicProductSerializer(ProductPriceMixin, serializers.Serializer):
     """
     Public, unauthenticated-safe view of a single product
-    (`marky.one/<slug>/product/<id>`).
+    (canonical `marky.one/<business>/<category-slug>/<product-slug>`, legacy
+    `marky.one/<business>/product/<id>`).
 
     Does NOT reuse ProductSerializer, which exposes `business`, `is_active`,
     and the raw unresolved/expired promo window fields meant for the admin
     edit form. Mirrors ProductLiteSerializer's resolved-promotion fields
     (product overrides category, via resolve_effective_promotion) and adds
-    `stopper`, `category` (id + name only), full `media`, `variants` and
+    `slug`, `stopper`, `category` (id + name + slug only), full `media`, `variants` and
     `addons` with explicit field lists, plus the descriptive extras
     (`featured_ingredients`, `presentation`, `allergens`, `celiac_info`) in the
     same raw shape the admin serializer emits.
     """
     id = serializers.IntegerField(read_only=True)
     name = serializers.CharField(read_only=True)
+    slug = serializers.CharField(read_only=True)
     description = serializers.CharField(read_only=True)
     price = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     stopper = serializers.CharField(read_only=True, allow_null=True)

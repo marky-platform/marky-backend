@@ -2,6 +2,13 @@ from decimal import Decimal
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 from business.models import BusinessProfile
+from .slugs import (
+    CATEGORY_FALLBACK_PREFIX,
+    PRODUCT_FALLBACK_PREFIX,
+    RESERVED_CATEGORY_SLUGS,
+    SLUG_MAX_LENGTH,
+    SlugAllocationMixin,
+)
 
 DISCOUNT_PERCENTAGE_VALIDATORS = [MinValueValidator(Decimal('0')), MaxValueValidator(Decimal('100'))]
 
@@ -11,9 +18,15 @@ class MultiBuyType(models.TextChoices):
     THREE_FOR_TWO = "3x2", "3x2"
 
 
-class ProductCategory(models.Model):
+class ProductCategory(SlugAllocationMixin, models.Model):
+    SLUG_SCOPE_FIELDS = ('business_id',)
+    SLUG_FALLBACK_PREFIX = CATEGORY_FALLBACK_PREFIX
+    RESERVED_SLUGS = RESERVED_CATEGORY_SLUGS
+
     business = models.ForeignKey(BusinessProfile, on_delete=models.CASCADE, related_name='product_categories')
     name = models.CharField(max_length=255)
+    # Public URL segment; allocated on first save, stable across renames (see products/slugs.py).
+    slug = models.SlugField(max_length=SLUG_MAX_LENGTH, editable=False, db_index=False)
     icon = models.CharField(max_length=50)
     order = models.IntegerField(default=1)
     # promotion
@@ -34,10 +47,19 @@ class ProductCategory(models.Model):
     def __str__(self):
         return self.name
 
+    def slug_scope_queryset(self):
+        return ProductCategory.objects.filter(business_id=self.business_id)
+
     class Meta:
         verbose_name = "Product Category"
         verbose_name_plural = "Product Categories"
         ordering = ['order']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['business', 'slug'],
+                name='unique_category_slug_per_business',
+            ),
+        ]
 
 
 def next_product_order(category):
@@ -48,13 +70,20 @@ def next_product_order(category):
     return (max_order or 0) + 1
 
 
-class Product(models.Model):
+class Product(SlugAllocationMixin, models.Model):
+    SLUG_SCOPE_FIELDS = ('business_id', 'category_id')
+    SLUG_FALLBACK_PREFIX = PRODUCT_FALLBACK_PREFIX
+
     STOPPER_CHOICES = [
         ('FAVORITE', 'Favorito del mes'),
         ('RECOMMENDED', 'Recomendado'),
     ]
 
     name = models.CharField(max_length=255)
+    # Public URL segment, unique within (business, category) or among the
+    # business's uncategorized products; stable across renames and category
+    # moves (re-suffixed only on a collision in the new category).
+    slug = models.SlugField(max_length=SLUG_MAX_LENGTH, editable=False, db_index=False)
     description = models.TextField()
     price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     category = models.ForeignKey(ProductCategory, on_delete=models.CASCADE,
@@ -111,10 +140,26 @@ class Product(models.Model):
                 condition=models.Q(stopper='RECOMMENDED'),
                 name='unique_recommended_stopper_per_category',
             ),
+            models.UniqueConstraint(
+                fields=['business', 'category', 'slug'],
+                condition=models.Q(category__isnull=False),
+                name='unique_product_slug_per_category',
+            ),
+            models.UniqueConstraint(
+                fields=['business', 'slug'],
+                condition=models.Q(category__isnull=True),
+                name='unique_uncategorized_product_slug_per_business',
+            ),
         ]
 
     def __str__(self):
         return self.name
+
+    def slug_scope_queryset(self):
+        qs = Product.objects.filter(business_id=self.business_id)
+        if self.category_id is None:
+            return qs.filter(category__isnull=True)
+        return qs.filter(category_id=self.category_id)
 
     def has_stopper(self):
         return self.stopper is not None
