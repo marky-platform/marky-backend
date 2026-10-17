@@ -2,10 +2,12 @@ import json
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest import mock, skipIf
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, connection, models, transaction
 from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework import serializers
@@ -15,6 +17,9 @@ from notifications.models import Notification
 from products.filters import ProductCategoryFilter
 from products.models import Product, ProductCategory, ProductVariant, ProductAddon
 from products.services import handle_expired_promotions_for_business
+from products import slugs as slugs_module
+from products.migrations._slug_backfill import backfill_missing_slugs
+from products.slugs import SLUG_MAX_LENGTH, slugify_name, with_suffix
 from products.validators import validate_media_extension, validate_media_size
 from products.promotions import (
     compute_promotion_status,
@@ -2397,6 +2402,368 @@ class TestPublicCatalogAndProductAPI(MarkyAPITestCase):
 
         for field in ('business', 'is_active', 'order'):
             self.assertNotIn(field, data)
+
+
+    # --- canonical slug URLs (batch 5) -----------------------------------
+
+    def _canonical_url(self, business_id, category_slug, product_slug):
+        return (
+            f'/api/v1/public/business/{business_id}/categories/{category_slug}/'
+            f'products/{product_slug}/'
+        )
+
+    def test_canonical_detail_matches_legacy_numeric_detail(self):
+        canonical = self.client.get(
+            self._canonical_url(self.profile.business_id, 'platos', 'visible')
+        )
+        legacy = self.client.get(
+            f'/api/v1/public/business/{self.profile.business_id}/products/{self.visible_product.id}/'
+        )
+        self.assertEqual(canonical.status_code, 200)
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(canonical.data, legacy.data)
+        self.assertEqual(canonical.data['id'], self.visible_product.id)
+        self.assertEqual(canonical.data['slug'], 'visible')
+        self.assertEqual(canonical.data['category'], {'id': self.category.id, 'name': 'Platos', 'slug': 'platos'})
+
+    def test_canonical_detail_404s_for_hidden_product(self):
+        response = self.client.get(self._canonical_url(self.profile.business_id, 'platos', 'hidden'))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(str(response.data['detail']), 'No se encontró el producto solicitado.')
+
+    def test_canonical_detail_404s_for_missing_product_category_or_business(self):
+        for url in (
+            self._canonical_url(self.profile.business_id, 'platos', 'no-existe'),
+            self._canonical_url(self.profile.business_id, 'no-existe', 'visible'),
+            self._canonical_url('does-not-exist', 'platos', 'visible'),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_canonical_detail_404s_under_the_wrong_category(self):
+        ProductCategory.objects.create(business=self.profile, name='Bebidas', icon='fa-glass', order=2)
+        self.assertEqual(
+            self.client.get(self._canonical_url(self.profile.business_id, 'bebidas', 'visible')).status_code,
+            404,
+        )
+        # A categorized product is never reachable through the uncategorized segment.
+        self.assertEqual(
+            self.client.get(self._canonical_url(self.profile.business_id, 'sin-categoria', 'visible')).status_code,
+            404,
+        )
+
+    def test_canonical_detail_is_tenant_scoped(self):
+        # Business B has a category with the same slug and an identically named product.
+        other_category = ProductCategory.objects.create(
+            business=self.other_profile, name='Platos', icon='fa-pizza', order=1,
+        )
+        other_visible = Product.objects.create(
+            name='Visible', description='Desc', price=Decimal('5.00'),
+            business=self.other_profile, category=other_category,
+        )
+        response = self.client.get(self._canonical_url(self.other_profile.business_id, 'platos', 'visible'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], other_visible.id)
+
+        # B's uncategorized product is not reachable under A's business slug.
+        self.assertEqual(
+            self.client.get(self._canonical_url(self.profile.business_id, 'sin-categoria', 'theirs')).status_code,
+            404,
+        )
+        # A product of A can't be reached through B's category, even with matching slugs.
+        Product.objects.filter(pk=other_visible.pk).update(is_active=False)
+        self.assertEqual(
+            self.client.get(self._canonical_url(self.other_profile.business_id, 'platos', 'visible')).status_code,
+            404,
+        )
+
+    def test_canonical_detail_resolves_uncategorized_products(self):
+        response = self.client.get(
+            self._canonical_url(self.other_profile.business_id, 'sin-categoria', 'theirs')
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], self.other_product.id)
+        self.assertIsNone(response.data['category'])
+
+    def test_catalog_and_category_list_expose_slugs(self):
+        Product.objects.create(
+            name='Suelto', description='Desc', price=Decimal('1.00'), business=self.profile,
+        )
+        catalog = self.client.get(f'/api/v1/public/business/{self.profile.business_id}/catalog/').data
+        by_slug = {category['slug']: category for category in catalog['results']}
+        self.assertIn('platos', by_slug)
+        self.assertEqual(by_slug['platos']['products'][0]['slug'], 'visible')
+        self.assertIn('sin-categoria', by_slug)
+        self.assertIsNone(by_slug['sin-categoria']['id'])
+        self.assertEqual([p['slug'] for p in by_slug['sin-categoria']['products']], ['suelto'])
+
+        categories = self.client.get(f'/api/v1/public/business/{self.profile.business_id}/categories/').data
+        rows = categories['results'] if isinstance(categories, dict) else categories
+        self.assertEqual([c['slug'] for c in rows], ['platos'])
+
+
+class TestProductSlugs(MarkyAPITestCase):
+    """Slug allocation policy for canonical public product URLs."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('slug_biz', 'slug_biz@test.com')
+        cls.other_user, cls.other_profile = cls.make_user('slug_other', 'slug_other@test.com')
+
+    def _category(self, name, business=None):
+        return ProductCategory.objects.create(business=business or self.profile, name=name, icon='fa-box')
+
+    def _product(self, name, category=None, business=None, **extra):
+        return Product.objects.create(
+            name=name, description='Desc', price=Decimal('1.00'),
+            business=business or self.profile, category=category, **extra,
+        )
+
+    def test_slugify_name_normalizes_accents_punctuation_and_whitespace(self):
+        cases = {
+            'Café Ñandú': 'cafe-nandu',
+            '¡Pizza  &  Pasta!': 'pizza-pasta',
+            '  Doble   espacio  ': 'doble-espacio',
+            'Hamburguesa_XL 2.0': 'hamburguesa_xl-20',
+            '寿司': '',
+            '🍕🍕': '',
+            '   ': '',
+            '---': '',
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(slugify_name(name), expected)
+
+    def test_with_suffix_truncates_to_max_length(self):
+        base = 'a' * SLUG_MAX_LENGTH
+        self.assertEqual(with_suffix(base, 1), base)
+        self.assertEqual(with_suffix(base, 2), 'a' * (SLUG_MAX_LENGTH - 2) + '-2')
+        self.assertEqual(len(with_suffix(base, 123)), SLUG_MAX_LENGTH)
+        # A truncation landing on a separator never yields a double dash.
+        self.assertEqual(with_suffix('a' * 252 + '-bcd', 2), 'a' * 252 + '-2')
+
+    def test_product_slugs_from_names(self):
+        self.assertEqual(self._product('Café Ñandú').slug, 'cafe-nandu')
+        self.assertEqual(self._product('¡Empanada de Carne!').slug, 'empanada-de-carne')
+
+    def test_empty_names_fall_back_to_id_based_slugs(self):
+        product = self._product('寿司')
+        self.assertEqual(product.slug, f'p-{product.pk}')
+        product.refresh_from_db()
+        self.assertEqual(product.slug, f'p-{product.pk}')
+        whitespace = self._product('   ')
+        self.assertEqual(whitespace.slug, f'p-{whitespace.pk}')
+        category = self._category('🍕')
+        category.refresh_from_db()
+        self.assertEqual(category.slug, f'c-{category.pk}')
+
+    def test_duplicate_names_in_same_category_get_deterministic_suffixes(self):
+        category = self._category('Pizzas')
+        slugs = [self._product('Muzzarella', category).slug for _ in range(3)]
+        self.assertEqual(slugs, ['muzzarella', 'muzzarella-2', 'muzzarella-3'])
+        # Names that only differ by accents/case collide too.
+        self.assertEqual(self._product('MUZZARÉLLA', category).slug, 'muzzarella-4')
+
+    def test_same_name_in_different_categories_and_businesses_does_not_collide(self):
+        pizzas = self._category('Pizzas')
+        promos = self._category('Promos')
+        self.assertEqual(self._product('Muzzarella', pizzas).slug, 'muzzarella')
+        self.assertEqual(self._product('Muzzarella', promos).slug, 'muzzarella')
+        self.assertEqual(self._product('Muzzarella').slug, 'muzzarella')  # uncategorized
+        self.assertEqual(self._product('Muzzarella').slug, 'muzzarella-2')
+        self.assertEqual(self._product('Muzzarella', business=self.other_profile).slug, 'muzzarella')
+
+    def test_category_slugs_unique_per_business(self):
+        self.assertEqual(self._category('Bebidas').slug, 'bebidas')
+        self.assertEqual(self._category('Bebidas').slug, 'bebidas-2')
+        self.assertEqual(self._category('Bebidas', business=self.other_profile).slug, 'bebidas')
+
+    def test_sin_categoria_is_reserved_for_uncategorized_products(self):
+        self.assertEqual(self._category('Sin categoría').slug, 'sin-categoria-2')
+        self.assertEqual(self._category('SIN CATEGORIA').slug, 'sin-categoria-3')
+
+    def test_legacy_product_segment_is_reserved(self):
+        # `/<business>/product/<id>` is the legacy route; a category slug of
+        # `product` would make its canonical links unreachable.
+        self.assertEqual(self._category('Product').slug, 'product-2')
+
+    def test_long_names_are_truncated_with_room_for_suffix(self):
+        category = self._category('Largos')
+        name = 'b' * 255
+        first = self._product(name, category)
+        second = self._product(name, category)
+        self.assertEqual(first.slug, 'b' * 255)
+        self.assertEqual(second.slug, 'b' * 253 + '-2')
+
+    def test_slug_is_stable_on_rename(self):
+        category = self._category('Pizzas')
+        product = self._product('Muzzarella', category)
+        product.name = 'Napolitana'
+        product.save()
+        category.name = 'Pizzas a la piedra'
+        category.save()
+        product.refresh_from_db()
+        category.refresh_from_db()
+        self.assertEqual(product.slug, 'muzzarella')
+        self.assertEqual(category.slug, 'pizzas')
+
+    def test_slug_is_stable_on_rename_through_the_admin_api(self):
+        category = self._category('Pizzas')
+        product = self._product('Muzzarella', category)
+        response = self.auth_client(self.user).patch(
+            f'/api/v1/products/products/{product.id}/', {'name': 'Napolitana'},
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        product.refresh_from_db()
+        self.assertEqual(product.name, 'Napolitana')
+        self.assertEqual(product.slug, 'muzzarella')
+
+    def test_api_create_allocates_slugs(self):
+        client = self.auth_client(self.user)
+        response = client.post('/api/v1/products/product-categories/', {'name': 'Sin categoría', 'icon': 'fa-box'})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['slug'], 'sin-categoria-2')
+        category = ProductCategory.objects.get(pk=response.data['id'])
+        response = client.post('/api/v1/products/products/', {
+            'name': 'Café', 'description': 'Desc', 'price': '1.00', 'category': category.id,
+        })
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Product.objects.get(business=self.profile, name='Café').slug, 'cafe')
+
+    def test_category_move_keeps_slug_and_resuffixes_on_collision(self):
+        pizzas = self._category('Pizzas')
+        promos = self._category('Promos')
+        self._product('Muzzarella', pizzas)
+        moving = self._product('Muzzarella', promos)
+        unique = self._product('Fugazzeta', promos)
+
+        unique.category = pizzas
+        unique.save()
+        self.assertEqual(unique.slug, 'fugazzeta')
+
+        moving.category = pizzas
+        moving.save()
+        moving.refresh_from_db()
+        self.assertEqual(moving.slug, 'muzzarella-2')
+
+        # Moving out to uncategorized also checks the uncategorized scope.
+        self._product('Fugazzeta')
+        unique.category = None
+        unique.save()
+        unique.refresh_from_db()
+        self.assertEqual(unique.slug, 'fugazzeta-2')
+
+    def test_concurrent_insert_collision_is_retried(self):
+        """Simulate a concurrent insert: the first allocation sees a stale
+        scope and returns a slug that is already taken (as if another request
+        committed between our check and our insert). The DB constraint raises
+        IntegrityError and save() re-allocates."""
+        category = self._category('Pizzas')
+        self._product('Muzzarella', category)
+        real_allocate = slugs_module.allocate_unique_slug
+        calls = []
+
+        def stale_then_real(base, exists_qs, reserved=frozenset()):
+            calls.append(base)
+            if len(calls) == 1:
+                return base  # stale view: doesn't see the committed 'muzzarella'
+            return real_allocate(base, exists_qs, reserved)
+
+        with mock.patch.object(slugs_module, 'allocate_unique_slug', side_effect=stale_then_real):
+            product = self._product('Muzzarella', category)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(product.slug, 'muzzarella-2')
+        self.assertTrue(Product.objects.filter(pk=product.pk, slug='muzzarella-2').exists())
+        self.assertEqual(Product.objects.filter(category=category).count(), 2)
+
+    def test_concurrent_collision_gives_up_after_max_attempts(self):
+        category = self._category('Pizzas')
+        self._product('Muzzarella', category)
+        with mock.patch.object(slugs_module, 'allocate_unique_slug', side_effect=lambda base, *a, **k: base):
+            with self.assertRaises(IntegrityError):
+                self._product('Muzzarella', category)
+        self.assertEqual(Product.objects.filter(category=category).count(), 1)
+
+    def test_non_slug_integrity_errors_are_not_retried(self):
+        category = self._category('Pizzas')
+        self._product('Primero', category, stopper='FAVORITE')
+        with mock.patch.object(
+            slugs_module, 'allocate_unique_slug', wraps=slugs_module.allocate_unique_slug,
+        ) as allocate:
+            with self.assertRaises(IntegrityError):
+                self._product('Segundo', category, stopper='FAVORITE')
+        self.assertEqual(allocate.call_count, 1)
+
+    def test_db_constraints_reject_duplicate_slugs(self):
+        category = self._category('Pizzas')
+        first = self._product('Muzzarella', category)
+        second = self._product('Otra', category)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Product.objects.filter(pk=second.pk).update(slug=first.slug)
+        loose_a = self._product('Suelta')
+        loose_b = self._product('Otra suelta')
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Product.objects.filter(pk=loose_b.pk).update(slug=loose_a.slug)
+        other_category = self._category('Otra')
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ProductCategory.objects.filter(pk=other_category.pk).update(slug=category.slug)
+
+    def _drop_slug_constraints(self):
+        """Put the schema back in its 0018/0019 shape (nullable, no uniqueness)
+        for the rest of this test; the TestCase transaction rolls it back."""
+        with connection.cursor() as cursor:
+            # Flush the deferred FK checks queued by setUp's inserts; PostgreSQL
+            # refuses ALTER TABLE while trigger events are pending.
+            cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+        with connection.schema_editor() as editor:
+            for model in (ProductCategory, Product):
+                for constraint in model._meta.constraints:
+                    if 'slug' in constraint.name:
+                        editor.remove_constraint(model, constraint)
+                old_field = model._meta.get_field('slug')
+                new_field = models.SlugField(max_length=SLUG_MAX_LENGTH, editable=False, db_index=False, null=True)
+                new_field.set_attributes_from_name('slug')
+                new_field.model = model
+                editor.alter_field(model, old_field, new_field)
+
+    @skipIf(connection.vendor == 'sqlite', 'needs transactional DDL inside the test transaction')
+    def test_backfill_is_deterministic_and_collision_safe(self):
+        pizzas = self._category('Pizzas')
+        pizzas_dup = self._category('Pizzas')
+        reserved = self._category('Sin categoría')
+        a = self._product('Muzzarella', pizzas)
+        b = self._product('Muzzarella', pizzas)
+        c = self._product('Muzzarella', pizzas_dup)
+        d = self._product('Suelto')
+        e = self._product('Suelto')
+        f = self._product('寿司')
+        other = self._product('Muzzarella', business=self.other_profile)
+        kept = self._product('Ya tenía slug', pizzas)
+
+        # Simulate the pre-migration state: every row but one without a slug.
+        self._drop_slug_constraints()
+        Product.objects.exclude(pk=kept.pk).update(slug=None)
+        ProductCategory.objects.update(slug='')
+
+        self.assertEqual(backfill_missing_slugs(ProductCategory, Product), (3, 7))
+
+        def slug_of(obj):
+            obj.refresh_from_db()
+            return obj.slug
+
+        self.assertEqual(
+            [slug_of(x) for x in (pizzas, pizzas_dup, reserved)],
+            ['pizzas', 'pizzas-2', 'sin-categoria-2'],
+        )
+        self.assertEqual(
+            [slug_of(x) for x in (a, b, c, d, e, f, other, kept)],
+            ['muzzarella', 'muzzarella-2', 'muzzarella', 'suelto', 'suelto-2',
+             f'p-{f.pk}', 'muzzarella', 'ya-tenia-slug'],
+        )
+        # Idempotent: nothing left to fill.
+        self.assertEqual(backfill_missing_slugs(ProductCategory, Product), (0, 0))
 
 
 class TestProductExtraFields(MarkyAPITestCase):
