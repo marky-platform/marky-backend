@@ -26,7 +26,9 @@ class ProductCategory(SlugAllocationMixin, models.Model):
     business = models.ForeignKey(BusinessProfile, on_delete=models.CASCADE, related_name='product_categories')
     name = models.CharField(max_length=255)
     # Public URL segment; allocated on first save, stable across renames (see products/slugs.py).
-    slug = models.SlugField(max_length=SLUG_MAX_LENGTH, editable=False, db_index=False)
+    # Nullable only for the rolling-deploy window (old code inserts without a
+    # slug); a follow-up migration makes it NOT NULL once this code is live.
+    slug = models.SlugField(max_length=SLUG_MAX_LENGTH, editable=False, db_index=False, null=True, blank=True)
     icon = models.CharField(max_length=50)
     order = models.IntegerField(default=1)
     # promotion
@@ -83,7 +85,7 @@ class Product(SlugAllocationMixin, models.Model):
     # Public URL segment, unique within (business, category) or among the
     # business's uncategorized products; stable across renames and category
     # moves (re-suffixed only on a collision in the new category).
-    slug = models.SlugField(max_length=SLUG_MAX_LENGTH, editable=False, db_index=False)
+    slug = models.SlugField(max_length=SLUG_MAX_LENGTH, editable=False, db_index=False, null=True, blank=True)
     description = models.TextField()
     price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     category = models.ForeignKey(ProductCategory, on_delete=models.CASCADE,
