@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'business',
     'products',
     'notifications',
+    'analytics',
 ]
 
 MIDDLEWARE = [
@@ -251,7 +252,13 @@ SIMPLE_JWT = {
     'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
 
+# Cantidad de proxies de confianza delante de Django (Railway = 1). DRF usa este valor
+# para derivar la IP del cliente desde X-Forwarded-For en los throttles; con 0 se ignora
+# el header y se usa REMOTE_ADDR (desarrollo local).
+NUM_PROXIES = env.int('NUM_PROXIES', default=0)
+
 REST_FRAMEWORK = {
+    'NUM_PROXIES': NUM_PROXIES,
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',
@@ -267,6 +274,7 @@ REST_FRAMEWORK = {
         'resend': '3/minute',
         'recovery': '5/minute',
         'public': '60/minute',
+        'analytics': '120/minute',
     },
     'DEFAULT_PARSER_CLASSES': [
         'drf_nested_forms.parsers.NestedMultiPartParser',
@@ -315,6 +323,14 @@ LOGGING = {
     #     },
     # },
 }
+
+# Analytics propio (app `analytics`)
+# Interruptor global: con False la ingesta pública responde 202 sin guardar nada.
+ANALYTICS_INGESTION_ENABLED = env.bool('ANALYTICS_INGESTION_ENABLED', default=True)
+# Retención de eventos crudos (13 meses); la aplica el comando `purge_analytics_events`.
+ANALYTICS_EVENT_RETENTION_DAYS = env.int('ANALYTICS_EVENT_RETENTION_DAYS', default=395)
+ANALYTICS_MAX_BATCH_SIZE = 20
+ANALYTICS_MAX_BODY_BYTES = 32 * 1024
 
 CITIES_LIGHT_DATA_DIR = os.path.join(BASE_DIR, 'cities')
 CITIES_LIGHT_TRANSLATION_LANGUAGES = ['es']

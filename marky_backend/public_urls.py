@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import include, path
 
 from business.public_views import PublicBusinessProfileView
 from products.public_views import (
@@ -9,6 +9,7 @@ from products.public_views import (
 )
 
 urlpatterns = [
+    path('business/<str:business_id>/analytics/', include('analytics.public_urls')),
     path('business/<str:business_id>/', PublicBusinessProfileView.as_view(), name='public-business-profile'),
     path('business/<str:business_id>/catalog/', PublicCatalogView.as_view(), name='public-business-catalog'),
     path('business/<str:business_id>/categories/', PublicCategoryListView.as_view(), name='public-business-categories'),
