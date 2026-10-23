@@ -6,12 +6,15 @@ from rest_framework.views import APIView
 from business.models import BusinessProfile
 from utils.permissions import IsBusinessOrSuperAdmin
 
-from .services import PULSE_DAYS, build_pulse
+from .services import PRODUCT_SORTS, PULSE_ALLOWED_DAYS, PULSE_DAYS, build_pulse
 
 
 @extend_schema(
     tags=['Analytics'],
-    parameters=[OpenApiParameter('days', int, description='Solo se admite 7.')],
+    parameters=[
+        OpenApiParameter('days', int, description='Período en días: 7 o 30.'),
+        OpenApiParameter('sort', str, description='Orden de productos: views (default) o time.'),
+    ],
 )
 class AnalyticsPulseView(APIView):
     """Métricas del widget Pulse del negocio autenticado. `GET /api/v1/business/analytics/pulse/?days=7`."""
@@ -28,7 +31,19 @@ class AnalyticsPulseView(APIView):
             )
 
         days = request.query_params.get('days', str(PULSE_DAYS))
-        if days != str(PULSE_DAYS):
-            return Response({'days': f'Solo se admite days={PULSE_DAYS}.'}, status=status.HTTP_400_BAD_REQUEST)
+        allowed = {str(d): d for d in PULSE_ALLOWED_DAYS}
+        if days not in allowed:
+            return Response(
+                {'days': f'Valores admitidos: {", ".join(allowed)}.'}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        sort = request.query_params.get('sort', 'views')
+        if sort not in PRODUCT_SORTS:
+            return Response(
+                {'sort': f'Valores admitidos: {", ".join(PRODUCT_SORTS)}.'}, status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        return Response(build_pulse(business, days=PULSE_DAYS))
+        data = build_pulse(business, days=allowed[days], product_sort=sort)
+        for product in data['top_products']:
+            if product['image']:
+                product['image'] = request.build_absolute_uri(product['image'])
+        return Response(data)

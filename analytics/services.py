@@ -10,7 +10,7 @@ from django.db.models.fields.json import KeyTextTransform
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
-from products.models import Product
+from products.models import Product, ProductMedia
 
 from .models import AnalyticsEvent
 
@@ -90,6 +90,10 @@ def ingest_events(business, validated_events):
 # ------------------------------------------------------------ agregación
 
 PULSE_DAYS = 7
+# Períodos que ofrece el selector del widget ("7 días" / "30 días").
+PULSE_ALLOWED_DAYS = (7, 30)
+# Orden del ranking de productos: por vistas válidas o por tiempo medio activo.
+PRODUCT_SORTS = ('views', 'time')
 TOP_PRODUCTS_LIMIT = 5
 DELETED_PRODUCT_NAME = 'Producto eliminado'
 
@@ -104,22 +108,28 @@ def _iso_utc(value):
     return value.astimezone(ZoneInfo('UTC')).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def build_pulse(business, now=None, days=PULSE_DAYS):
+def build_pulse(business, now=None, days=PULSE_DAYS, product_sort='views'):
     """Métricas del widget "Pulse" de un negocio. Días en America/Asuncion.
 
     Visitas/orígenes/acciones/top productos cubren la ventana de `days` días locales
-    (hoy incluido); `today` cubre solo el día local actual.
+    (hoy incluido); `today` cubre solo el día local actual. `previous` trae los
+    totales de los `days` días anteriores para los deltas del widget.
     """
     tz = _business_tz()
     now = now or timezone.now()
     today = now.astimezone(tz).date()
     first_day = today - timedelta(days=days - 1)
     window_start = datetime.combine(first_day, time.min, tzinfo=tz)
+    previous_start = datetime.combine(first_day - timedelta(days=days), time.min, tzinfo=tz)
     today_start = datetime.combine(today, time.min, tzinfo=tz)
 
     events = AnalyticsEvent.objects.filter(business=business)
     window = events.filter(received_at__gte=window_start, received_at__lte=now)
     visits = window.filter(event_type=EventType.CATALOG_VISIT)
+    previous = events.filter(received_at__gte=previous_start, received_at__lt=window_start).aggregate(
+        visits=Count('id', filter=Q(event_type=EventType.CATALOG_VISIT)),
+        actions=Count('id', filter=Q(event_type=EventType.ACTION_CLICK)),
+    )
 
     # Historial: visitas por fecha local, con ceros para los días sin actividad.
     per_day = {
@@ -152,6 +162,9 @@ def build_pulse(business, now=None, days=PULSE_DAYS):
     return {
         'generated_at': _iso_utc(now),
         'timezone': settings.TIME_ZONE,
+        'days': days,
+        'period': {'start': first_day.isoformat(), 'end': today.isoformat()},
+        'previous': previous,
         'today': {
             'visits': today_stats['visits'],
             'unique_visitors': today_stats['unique_visitors'],
@@ -160,11 +173,22 @@ def build_pulse(business, now=None, days=PULSE_DAYS):
         'history': history,
         'sources': sources,
         'actions': actions,
-        'top_products': _top_products(window),
+        'top_products': _top_products(window, product_sort),
     }
 
 
-def _top_products(window):
+def _first_images(product_ids):
+    """Primera imagen (orden de la galería) de cada producto, como URL relativa."""
+    images = {}
+    media = ProductMedia.objects.filter(
+        product_id__in=product_ids, media_type=ProductMedia.IMAGE,
+    ).order_by('product_id', 'order', 'id').values_list('product_id', 'file')
+    for product_id, file in media:
+        images.setdefault(product_id, file)
+    return {pid: ProductMedia._meta.get_field('file').storage.url(f) for pid, f in images.items() if f}
+
+
+def _top_products(window, product_sort='views'):
     """Ranking por `product_view` (no por opens) con tiempo medio activo por vista.
 
     Dos queries agrupadas + una de nombres, sin importar cuántos productos haya.
@@ -188,13 +212,21 @@ def _top_products(window):
         entry['meta_name'] = entry['meta_name'] or row['meta_name']
 
     ranked = [(key, entry) for key, entry in stats.items() if entry['views'] > 0]
-    ranked.sort(key=lambda item: (
-        -item[1]['views'], -item[1]['ms'], str(item[1]['meta_name'] or ''), str(item[0]),
-    ))
+    if product_sort == 'time':
+        # Tiempo medio por vista (ms/vistas); desempata por vistas.
+        ranked.sort(key=lambda item: (
+            -item[1]['ms'] / item[1]['views'], -item[1]['views'],
+            str(item[1]['meta_name'] or ''), str(item[0]),
+        ))
+    else:
+        ranked.sort(key=lambda item: (
+            -item[1]['views'], -item[1]['ms'], str(item[1]['meta_name'] or ''), str(item[0]),
+        ))
     ranked = ranked[:TOP_PRODUCTS_LIMIT]
 
     live_ids = [key for key, _ in ranked if not isinstance(key, tuple)]
     names = dict(Product.objects.filter(id__in=live_ids).values_list('id', 'name')) if live_ids else {}
+    images = _first_images(live_ids) if live_ids else {}
 
     result = []
     for key, entry in ranked:
@@ -207,6 +239,7 @@ def _top_products(window):
         result.append({
             'product_id': product_id,
             'name': name,
+            'image': images.get(product_id) if product_id is not None else None,
             'views': views,
             # Redondeo half-up en enteros: ms totales / vistas válidas, en segundos.
             'average_engaged_seconds': (2 * entry['ms'] + 1000 * views) // (2000 * views),

@@ -28,14 +28,39 @@ class PulseTests(AnalyticsTestCase):
         user = get_user_model().objects.create_user('x', 'x@test.com', 'pw')
         self.assertEqual(self.get(user).status_code, 403)
 
-    def test_days_must_be_7(self):
-        self.assertEqual(self.get(self.user_a, '/api/v1/business/analytics/pulse/?days=30').status_code, 400)
-        self.assertEqual(self.get(self.user_a, '/api/v1/business/analytics/pulse/?days=abc').status_code, 400)
+    def test_days_must_be_7_or_30(self):
+        for bad in ('14', 'abc'):
+            self.assertEqual(self.get(self.user_a, f'/api/v1/business/analytics/pulse/?days={bad}').status_code, 400)
         self.assertEqual(self.get(self.user_a, '/api/v1/business/analytics/pulse/').status_code, 200)
+        data = self.get(self.user_a, '/api/v1/business/analytics/pulse/?days=30').json()
+        self.assertEqual(data['days'], 30)
+        self.assertEqual(len(data['history']), 30)
+
+    def test_sort_must_be_views_or_time(self):
+        self.assertEqual(self.get(self.user_a, f'{URL}&sort=name').status_code, 400)
+        self.assertEqual(self.get(self.user_a, f'{URL}&sort=time').status_code, 200)
+
+    def test_period_and_previous_totals(self):
+        now = local(2026, 10, 23, 13)
+        # Ventana actual: 17–23/10. Anterior: 10–16/10.
+        self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 20))
+        self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 16, 23, 59))
+        self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 10, 0, 0))
+        self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 9, 23, 59))  # fuera de ambas
+        self.make_event(self.biz_a, 'action_click', at=local(2026, 10, 12), action_type='whatsapp')
+        self.make_event(self.biz_a, 'action_click', at=local(2026, 10, 21), action_type='whatsapp')
+        pulse = build_pulse(self.biz_a, now=now)
+        self.assertEqual(pulse['days'], 7)
+        self.assertEqual(pulse['period'], {'start': '2026-10-17', 'end': '2026-10-23'})
+        self.assertEqual(pulse['previous'], {'visits': 2, 'actions': 1})
 
     def test_empty_response_shape_and_zero_history(self):
         data = self.get(self.user_a).json()
-        self.assertEqual(set(data), {'generated_at', 'timezone', 'today', 'history', 'sources', 'actions', 'top_products'})
+        self.assertEqual(set(data), {
+            'generated_at', 'timezone', 'days', 'period', 'previous',
+            'today', 'history', 'sources', 'actions', 'top_products',
+        })
+        self.assertEqual(data['previous'], {'visits': 0, 'actions': 0})
         self.assertEqual(data['timezone'], 'America/Asuncion')
         self.assertEqual(data['today'], {'visits': 0, 'unique_visitors': 0, 'last_visit_at': None})
         self.assertEqual(len(data['history']), 7)
@@ -143,9 +168,32 @@ class PulseTests(AnalyticsTestCase):
         self.make_event(self.biz_a, 'product_engagement', at=at, product=sushi, engaged_ms=2_500)
         top = build_pulse(self.biz_a, now=now)['top_products']
         self.assertEqual(top, [
-            {'product_id': pizza.pk, 'name': 'Pizza', 'views': 3, 'average_engaged_seconds': 19},
-            {'product_id': sushi.pk, 'name': 'Sushi', 'views': 1, 'average_engaged_seconds': 3},
+            {'product_id': pizza.pk, 'name': 'Pizza', 'image': None, 'views': 3, 'average_engaged_seconds': 19},
+            {'product_id': sushi.pk, 'name': 'Sushi', 'image': None, 'views': 1, 'average_engaged_seconds': 3},
         ])
+        by_time = build_pulse(self.biz_a, now=now, product_sort='time')['top_products']
+        self.assertEqual([p['name'] for p in by_time], ['Pizza', 'Sushi'])
+        # Con más tiempo medio, Sushi pasa primero aunque tenga menos vistas.
+        self.make_event(self.biz_a, 'product_engagement', at=at, product=sushi, engaged_ms=30_000)
+        by_time = build_pulse(self.biz_a, now=now, product_sort='time')['top_products']
+        self.assertEqual([p['name'] for p in by_time], ['Sushi', 'Pizza'])
+        self.assertEqual([p['name'] for p in build_pulse(self.biz_a, now=now)['top_products']], ['Pizza', 'Sushi'])
+
+    def test_top_products_include_first_image_as_absolute_url(self):
+        import tempfile
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from django.test import override_settings
+        with override_settings(MEDIA_ROOT=tempfile.mkdtemp()):
+            self._assert_first_image(SimpleUploadedFile)
+
+    def _assert_first_image(self, SimpleUploadedFile):
+        from products.models import ProductMedia
+        ProductMedia.objects.create(product=self.prod_a, order=2, file=SimpleUploadedFile('b.jpg', b'x'))
+        first = ProductMedia.objects.create(product=self.prod_a, order=1, file=SimpleUploadedFile('a.jpg', b'x'))
+        self.make_event(self.biz_a, 'product_view', product=self.prod_a)
+        image = self.get(self.user_a).json()['top_products'][0]['image']
+        self.assertTrue(image.startswith('http://testserver/'), image)
+        self.assertTrue(image.endswith(first.file.url), image)
 
     def test_top_products_limited_to_five(self):
         now = local(2026, 10, 23, 13)
@@ -161,7 +209,7 @@ class PulseTests(AnalyticsTestCase):
         self.make_event(self.biz_a, 'product_engagement', at=at, product=self.prod_a, engaged_ms=4000)
         self.prod_a.delete()
         top = build_pulse(self.biz_a, now=now)['top_products']
-        self.assertEqual(top, [{'product_id': None, 'name': 'Pizza', 'views': 1, 'average_engaged_seconds': 4}])
+        self.assertEqual(top, [{'product_id': None, 'name': 'Pizza', 'image': None, 'views': 1, 'average_engaged_seconds': 4}])
 
     def test_deleted_product_without_metadata_name(self):
         now = local(2026, 10, 23, 13)
