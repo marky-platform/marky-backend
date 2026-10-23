@@ -2,7 +2,7 @@ import json
 
 from rest_framework import status
 from rest_framework.exceptions import APIException, ParseError
-from rest_framework.parsers import BaseParser, JSONParser
+from rest_framework.parsers import JSONParser
 
 
 class PayloadTooLarge(APIException):
@@ -30,7 +30,7 @@ class LimitedJSONParser(JSONParser):
             raise ParseError(f'JSON inválido: {exc}')
 
 
-class PlainTextJSONParser(BaseParser):
+class PlainTextJSONParser(LimitedJSONParser):
     """JSON enviado como `text/plain;charset=UTF-8`.
 
     El tracker usa este content-type (CORS-simple, sin preflight) para que `fetch keepalive`
@@ -38,11 +38,3 @@ class PlainTextJSONParser(BaseParser):
     """
 
     media_type = 'text/plain'
-
-    def parse(self, stream, media_type=None, parser_context=None):
-        from django.conf import settings
-        data = _read_limited(stream, settings.ANALYTICS_MAX_BODY_BYTES)
-        try:
-            return json.loads(data.decode('utf-8'))
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise ParseError(f'JSON inválido: {exc}')
