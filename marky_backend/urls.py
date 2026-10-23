@@ -22,6 +22,7 @@ from drf_spectacular.views import SpectacularJSONAPIView, SpectacularSwaggerView
 
 api_v1_patterns = [
     path('users/', include('users.urls')),
+    path('business/analytics/', include('analytics.urls')),
     path('business/', include('business.urls')),
     path('products/', include('products.urls')),
     path('notifications/', include('notifications.urls')),
