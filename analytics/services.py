@@ -18,7 +18,8 @@ EventType = AnalyticsEvent.EventType
 
 # Detección básica y testeable de automatizaciones evidentes. No pretende ser perfecta.
 _BOT_UA_RE = re.compile(
-    r'bot\b|bot/|crawl|spider|slurp|headless|phantomjs|puppeteer|playwright|selenium|lighthouse|'
+    # `bot` solo como token propio: evita falsos positivos como el teléfono CUBOT o "Robot".
+    r'(?<![a-z])bot\b|bot/|crawl|spider|slurp|headless|phantomjs|puppeteer|playwright|selenium|lighthouse|'
     r'pingdom|uptime|curl/|wget/|python-requests|python-urllib|httpclient|okhttp|'
     r'go-http-client|java/|libwww|scrapy|facebookexternalhit|whatsapp/|telegrambot',
     re.IGNORECASE,

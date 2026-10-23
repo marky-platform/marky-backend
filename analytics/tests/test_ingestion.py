@@ -200,7 +200,10 @@ class IngestionTests(AnalyticsTestCase):
             self.assertTrue(is_bot_user_agent(ua), ua)
         for ua in ['', None, 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 '
                              '(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-                   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36']:
+                   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+                   'Mozilla/5.0 (Linux; Android 11; CUBOT NOTE 20 PRO) AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/120.0 Mobile Safari/537.36',
+                   'Mozilla/5.0 (Linux; Android 10; Robot X1) Chrome/120.0 Mobile Safari/537.36']:
             self.assertFalse(is_bot_user_agent(ua), ua)
 
     @override_settings(ANALYTICS_INGESTION_ENABLED=False)

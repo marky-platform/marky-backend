@@ -79,17 +79,17 @@ class AnalyticsEvent(models.Model):
                 name='ae_unique_product_view_per_session',
             ),
             models.CheckConstraint(
-                check=Q(event_type__in=['catalog_visit', 'product_open', 'product_view',
+                condition=Q(event_type__in=['catalog_visit', 'product_open', 'product_view',
                                         'product_engagement', 'action_click']),
                 name='ae_valid_event_type',
             ),
             models.CheckConstraint(
-                check=Q(event_type='action_click', action_type__in=['location', 'whatsapp', 'instagram', 'other'])
+                condition=Q(event_type='action_click', action_type__in=['location', 'whatsapp', 'instagram', 'other'])
                 | (~Q(event_type='action_click') & Q(action_type='')),
                 name='ae_action_type_only_for_clicks',
             ),
             models.CheckConstraint(
-                check=Q(engaged_ms=0)
+                condition=Q(engaged_ms=0)
                 | Q(event_type='product_engagement', engaged_ms__lte=30_000),
                 name='ae_engaged_ms_only_for_engagement',
             ),
