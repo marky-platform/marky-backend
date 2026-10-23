@@ -195,12 +195,12 @@ class PulseTests(AnalyticsTestCase):
         self.assertTrue(image.startswith('http://testserver/'), image)
         self.assertTrue(image.endswith(first.file.url), image)
 
-    def test_top_products_limited_to_five(self):
+    def test_top_products_limited_to_three(self):
         now = local(2026, 10, 23, 13)
         for i in range(7):
             product = self.make_product(self.biz_a, f'P{i}')
             self.make_event(self.biz_a, 'product_view', at=local(2026, 10, 23, 10), product=product)
-        self.assertEqual(len(build_pulse(self.biz_a, now=now)['top_products']), 5)
+        self.assertEqual(len(build_pulse(self.biz_a, now=now)["top_products"]), 3)
 
     def test_deleted_product_uses_metadata_name(self):
         now = local(2026, 10, 23, 13)

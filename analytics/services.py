@@ -94,7 +94,8 @@ PULSE_DAYS = 7
 PULSE_ALLOWED_DAYS = (7, 30)
 # Orden del ranking de productos: por vistas válidas o por tiempo medio activo.
 PRODUCT_SORTS = ('views', 'time')
-TOP_PRODUCTS_LIMIT = 5
+# El widget muestra 3 productos (Figma 6893:20581).
+TOP_PRODUCTS_LIMIT = 3
 DELETED_PRODUCT_NAME = 'Producto eliminado'
 
 
