@@ -2267,6 +2267,136 @@ class TestPublicCatalogAndProductAPI(MarkyAPITestCase):
         self.assertIn(self.visible_product.id, product_ids)
         self.assertNotIn(self.hidden_product.id, product_ids)
 
+    def test_empty_and_inactive_only_categories_are_absent_from_public_lists(self):
+        empty_category = ProductCategory.objects.create(
+            business=self.profile, name='Vacía', icon='fa-box', order=2,
+        )
+        inactive_category = ProductCategory.objects.create(
+            business=self.profile, name='Solo inactivos', icon='fa-box', order=3,
+        )
+        Product.objects.create(
+            name='No visible', description='Desc', price=Decimal('1.00'),
+            business=self.profile, category=inactive_category, is_active=False,
+        )
+
+        base = f'/api/v1/public/business/{self.profile.business_id}'
+        catalog = self.client.get(f'{base}/catalog/')
+        categories = self.client.get(f'{base}/categories/')
+
+        self.assertEqual(catalog.status_code, 200)
+        self.assertEqual(categories.status_code, 200)
+        catalog_ids = [category['id'] for category in catalog.data['results']]
+        category_rows = (
+            categories.data['results']
+            if isinstance(categories.data, dict)
+            else categories.data
+        )
+        category_ids = [category['id'] for category in category_rows]
+
+        self.assertNotIn(empty_category.id, catalog_ids)
+        self.assertNotIn(inactive_category.id, catalog_ids)
+        self.assertNotIn(empty_category.id, category_ids)
+        self.assertNotIn(inactive_category.id, category_ids)
+
+    @staticmethod
+    def _names(response):
+        rows = response.data['results'] if isinstance(response.data, dict) else response.data
+        return [row['name'] for row in rows]
+
+    def _public_urls(self):
+        base = f'/api/v1/public/business/{self.profile.business_id}'
+        return f'{base}/catalog/', f'{base}/categories/'
+
+    def test_category_with_active_and_inactive_products_stays_with_only_active_ones(self):
+        catalog_url, categories_url = self._public_urls()
+        catalog = self.client.get(catalog_url)
+
+        self.assertIn('Platos', self._names(catalog))
+        self.assertIn('Platos', self._names(self.client.get(categories_url)))
+        platos = next(c for c in catalog.data['results'] if c['name'] == 'Platos')
+        self.assertEqual([p['name'] for p in platos['products']], ['Visible'])
+
+    def test_empty_category_reappears_when_it_gets_an_active_product(self):
+        empty = ProductCategory.objects.create(
+            business=self.profile, name='Postres', icon='fa-box', order=2,
+        )
+        catalog_url, categories_url = self._public_urls()
+        self.assertNotIn('Postres', self._names(self.client.get(catalog_url)))
+        self.assertNotIn('Postres', self._names(self.client.get(categories_url)))
+
+        Product.objects.create(
+            name='Flan', description='Desc', price=Decimal('3.00'),
+            business=self.profile, category=empty, is_active=True,
+        )
+
+        self.assertIn('Postres', self._names(self.client.get(catalog_url)))
+        self.assertIn('Postres', self._names(self.client.get(categories_url)))
+
+    def test_admin_endpoints_still_list_empty_categories(self):
+        empty = ProductCategory.objects.create(
+            business=self.profile, name='Vacía', icon='fa-box', order=2,
+        )
+        inactive_only = ProductCategory.objects.create(
+            business=self.profile, name='Solo inactivos', icon='fa-box', order=3,
+        )
+        Product.objects.create(
+            name='Oculto', description='Desc', price=Decimal('1.00'),
+            business=self.profile, category=inactive_only, is_active=False,
+        )
+        client = self.auth_client(self.user)
+
+        with_products = client.get('/api/v1/products/product-categories/with_products/')
+        plain = client.get('/api/v1/products/product-categories/')
+
+        for response in (with_products, plain):
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(empty.name, self._names(response))
+            self.assertIn(inactive_only.name, self._names(response))
+
+    def test_category_level_promotion_without_visible_products_is_hidden(self):
+        promo_empty = ProductCategory.objects.create(
+            business=self.profile, name='Promo vacía', icon='fa-box', order=2,
+        )
+        ProductCategory.objects.filter(pk=promo_empty.pk).update(
+            multibuy_option='2x1',
+            promotion_starts_at=timezone.now() - timedelta(days=1),
+            promotion_ends_at=timezone.now() + timedelta(days=1),
+        )
+        catalog_url, _ = self._public_urls()
+
+        response = self.client.get(catalog_url, {'has_promotion': 'true'})
+
+        self.assertNotIn('Promo vacía', self._names(response))
+
+    def test_public_lists_have_no_duplicates_and_count_only_visible_categories(self):
+        for i in range(3):
+            Product.objects.create(
+                name=f'Extra {i}', description='Desc', price=Decimal('1.00'),
+                business=self.profile, category=self.category, is_active=True,
+            )
+        ProductCategory.objects.create(business=self.profile, name='Vacía', icon='fa-box', order=2)
+        catalog_url, categories_url = self._public_urls()
+
+        catalog = self.client.get(catalog_url)
+        categories = self.client.get(categories_url)
+
+        self.assertEqual(self._names(categories), ['Platos'])
+        self.assertEqual(catalog.data['count'], 1)
+        self.assertEqual(catalog.data['products_count'], 4)
+
+    def test_business_with_only_uncategorized_products_still_gets_sin_categoria(self):
+        _, solo = self.make_user('uncat_biz', 'uncat_biz@test.com')
+        Product.objects.create(
+            name='Suelto', description='Desc', price=Decimal('1.00'),
+            business=solo, category=None, is_active=True,
+        )
+        ProductCategory.objects.create(business=solo, name='Vacía', icon='fa-box', order=1)
+
+        response = self.client.get(f'/api/v1/public/business/{solo.business_id}/catalog/')
+
+        self.assertEqual(self._names(response), ['Sin categoría'])
+        self.assertEqual(response.data['products_count'], 1)
+
     def test_inactive_product_404s_on_detail(self):
         response = self.client.get(
             f'/api/v1/public/business/{self.profile.business_id}/products/{self.hidden_product.id}/'
