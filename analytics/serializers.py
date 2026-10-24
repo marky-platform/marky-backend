@@ -4,6 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .models import AnalyticsEvent
+from .services import normalize_source
 
 EventType = AnalyticsEvent.EventType
 
@@ -20,9 +21,9 @@ class AnalyticsEventInputSerializer(serializers.Serializer):
     session_id = serializers.UUIDField()
     type = serializers.ChoiceField(choices=EventType.choices)
     product_id = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=2**31 - 1)
-    source = serializers.ChoiceField(
-        choices=AnalyticsEvent.Source.choices, required=False, allow_blank=True, default='',
-    )
+    # Tolerante a propósito: clientes viejos pueden mandar `direct`/`other`; se normaliza
+    # a Link (todo lo que no sea QR es Link) en lugar de rechazar el evento.
+    source = serializers.CharField(required=False, allow_blank=True, max_length=24, default='')
     occurred_at = serializers.DateTimeField(required=False, allow_null=True, default=None)
     engaged_ms = serializers.IntegerField(
         required=False, min_value=0, max_value=AnalyticsEvent.MAX_ENGAGED_MS, default=0,
@@ -30,6 +31,9 @@ class AnalyticsEventInputSerializer(serializers.Serializer):
     action_type = serializers.ChoiceField(
         choices=AnalyticsEvent.ActionType.choices, required=False, allow_blank=True, default='',
     )
+
+    def validate_source(self, value):
+        return normalize_source(value)
 
     def validate(self, attrs):
         event_type = attrs['type']

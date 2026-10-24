@@ -40,32 +40,29 @@ class PulseTests(AnalyticsTestCase):
         self.assertEqual(self.get(self.user_a, f'{URL}&sort=name').status_code, 400)
         self.assertEqual(self.get(self.user_a, f'{URL}&sort=time').status_code, 200)
 
-    def test_period_and_previous_totals(self):
+    def test_period_has_no_previous_totals(self):
         now = local(2026, 10, 23, 13)
-        # Ventana actual: 17–23/10. Anterior: 10–16/10.
+        # Ventana actual: 17–23/10. Lo anterior no se compara ni se expone.
         self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 20))
         self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 16, 23, 59))
-        self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 10, 0, 0))
-        self.make_event(self.biz_a, 'catalog_visit', at=local(2026, 10, 9, 23, 59))  # fuera de ambas
         self.make_event(self.biz_a, 'action_click', at=local(2026, 10, 12), action_type='whatsapp')
-        self.make_event(self.biz_a, 'action_click', at=local(2026, 10, 21), action_type='whatsapp')
         pulse = build_pulse(self.biz_a, now=now)
         self.assertEqual(pulse['days'], 7)
         self.assertEqual(pulse['period'], {'start': '2026-10-17', 'end': '2026-10-23'})
-        self.assertEqual(pulse['previous'], {'visits': 2, 'actions': 1})
+        self.assertNotIn('previous', pulse)
+        self.assertEqual(sum(d['visits'] for d in pulse['history']), 1)
 
     def test_empty_response_shape_and_zero_history(self):
         data = self.get(self.user_a).json()
         self.assertEqual(set(data), {
-            'generated_at', 'timezone', 'days', 'period', 'previous',
+            'generated_at', 'timezone', 'days', 'period',
             'today', 'history', 'sources', 'actions', 'top_products',
         })
-        self.assertEqual(data['previous'], {'visits': 0, 'actions': 0})
         self.assertEqual(data['timezone'], 'America/Asuncion')
         self.assertEqual(data['today'], {'visits': 0, 'unique_visitors': 0, 'last_visit_at': None})
         self.assertEqual(len(data['history']), 7)
         self.assertTrue(all(h['visits'] == 0 for h in data['history']))
-        self.assertEqual(data['sources'], {'public_link': 0, 'qr': 0, 'direct': 0, 'other': 0})
+        self.assertEqual(data['sources'], {'public_link': 0, 'qr': 0})
         self.assertEqual(data['actions'], {'location': 0, 'whatsapp': 0, 'instagram': 0, 'other': 0})
         self.assertEqual(data['top_products'], [])
         self.assertTrue(data['generated_at'].endswith('Z'))
@@ -147,7 +144,9 @@ class PulseTests(AnalyticsTestCase):
             self.make_event(self.biz_a, 'action_click', at=at, action_type=action)
         self.make_event(self.biz_a, 'action_click', at=local(2026, 10, 1), action_type='location')  # fuera
         pulse = build_pulse(self.biz_a, now=now)
-        self.assertEqual(pulse['sources'], {'public_link': 2, 'qr': 1, 'direct': 2, 'other': 1})
+        # Filas viejas (direct/other/vacío) cuentan como Link: Link + QR = total de visitas.
+        self.assertEqual(pulse['sources'], {'public_link': 5, 'qr': 1})
+        self.assertEqual(sum(pulse['sources'].values()), sum(d['visits'] for d in pulse['history']))
         self.assertEqual(pulse['actions'], {'location': 1, 'whatsapp': 2, 'instagram': 1, 'other': 1})
 
     def test_top_products_ranking_and_average(self):

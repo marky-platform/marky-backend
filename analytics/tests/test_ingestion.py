@@ -124,7 +124,7 @@ class IngestionTests(AnalyticsTestCase):
         response = self.post_events('biz-a', [dup, fresh])
         self.assertEqual(response.json(), {'accepted': 1, 'duplicates': 1, 'rejected': 0})
 
-    def test_new_session_same_visitor_new_visit_and_view(self):
+    def test_new_session_same_visitor_new_view_but_same_visit_window(self):
         visitor = str(uuid.uuid4())
         pid = self.prod_a.pk
         for _ in range(2):
@@ -133,7 +133,8 @@ class IngestionTests(AnalyticsTestCase):
                 self.ev('catalog_visit', visitor_id=visitor, session_id=session),
                 self.ev('product_view', visitor_id=visitor, session_id=session, product_id=pid),
             ])
-        self.assertEqual(AnalyticsEvent.objects.filter(event_type='catalog_visit').count(), 2)
+        # La visita se deduplica por visitante en 4 h; la vista de producto sigue por sesión.
+        self.assertEqual(AnalyticsEvent.objects.filter(event_type='catalog_visit').count(), 1)
         self.assertEqual(AnalyticsEvent.objects.filter(event_type='product_view').count(), 2)
         self.assertEqual(AnalyticsEvent.objects.values('visitor_id').distinct().count(), 1)
 
@@ -161,7 +162,6 @@ class IngestionTests(AnalyticsTestCase):
             self.ev('product_open'),                                  # falta product_id
             self.ev('action_click'),                                  # falta action_type
             self.ev('action_click', action_type='tiktok'),
-            self.ev('catalog_visit', source='facebook'),
             self.ev('catalog_visit', occurred_at='ayer'),
             self.ev('product_open', product_id=pid, engaged_ms=100),  # engaged_ms solo en engagement
             self.ev('product_engagement', product_id=pid, engaged_ms=30_001),
@@ -279,11 +279,10 @@ class ConstraintTests(AnalyticsTestCase):
         with self.assertRaises(IntegrityError):
             self._create(event_type='bogus')
 
-    def test_db_unique_visit_and_view(self):
+    def test_db_unique_view(self):
         session = uuid.uuid4()
+        # La unicidad de visitas vive en CatalogVisitWindow (4 h), no en un constraint por sesión.
         self._create(event_type='catalog_visit', session_id=session)
-        with self.assertRaises(IntegrityError):
-            self._create(event_type='catalog_visit', session_id=session)
         self._create(event_type='product_view', product=self.prod_a, session_id=session)
         with self.assertRaises(IntegrityError):
             self._create(event_type='product_view', product=self.prod_a, session_id=session)
@@ -318,3 +317,28 @@ class RetentionCommandTests(AnalyticsTestCase):
         self.assertEqual(AnalyticsEvent.objects.count(), 1)
         call_command('purge_analytics_events', verbosity=0)
         self.assertEqual(AnalyticsEvent.objects.count(), 0)
+
+
+class SourceNormalizationTests(AnalyticsTestCase):
+    def _source_stored(self, **kw):
+        response = self.post_events('biz-a', [self.ev('catalog_visit', **kw)])
+        self.assertEqual(response.status_code, 202)
+        return AnalyticsEvent.objects.get().source
+
+    def test_qr_is_kept(self):
+        self.assertEqual(self._source_stored(source='qr'), 'qr')
+
+    def test_public_link_is_kept(self):
+        self.assertEqual(self._source_stored(source='public_link'), 'public_link')
+
+    def test_everything_else_falls_back_to_link(self):
+        for index, source in enumerate(['direct', 'other', '', 'tiktok', 'QRX', 'x' * 24]):
+            AnalyticsEvent.objects.all().delete()
+            self.assertEqual(self._source_stored(source=source), 'public_link', f'caso {index}: {source!r}')
+
+    def test_missing_source_is_link(self):
+        self.assertEqual(self._source_stored(), 'public_link')
+
+    def test_non_qr_source_never_rejects_the_event(self):
+        response = self.post_events('biz-a', [self.ev('catalog_visit', source='direct')])
+        self.assertEqual(response.json(), {'accepted': 1, 'duplicates': 0, 'rejected': 0})
