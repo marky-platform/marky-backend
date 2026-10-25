@@ -76,7 +76,7 @@ def _public_product_response(request, business, **lookup):
     """Shared by the canonical and legacy detail views so both apply the same
     visibility rules (active only, scoped to `business`) and payload."""
     try:
-        product = _active_products().select_related('category').prefetch_related(
+        product = _active_products().select_related('category', 'model_3d').prefetch_related(
             'variants', 'addons', 'media'
         ).get(business=business, **lookup)
     except Product.DoesNotExist:

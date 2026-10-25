@@ -9,6 +9,7 @@ from .promotions import resolve_effective_promotion, ACTIVE as PROMOTION_ACTIVE
 from .serializers import (
     ProductPriceMixin,
     ProductMediaSerializer,
+    Product3DModelSerializer,
     ProductCategoryLiteSerializer,
 )
 
@@ -57,6 +58,7 @@ class PublicProductSerializer(ProductPriceMixin, serializers.Serializer):
     is_available = serializers.BooleanField(read_only=True)
     category = ProductCategoryLiteSerializer(read_only=True)
     media = ProductMediaSerializer(many=True, read_only=True)
+    model_3d = Product3DModelSerializer(read_only=True, allow_null=True)
     variants = PublicProductVariantSerializer(many=True, read_only=True)
     addons = PublicProductAddonSerializer(many=True, read_only=True)
     featured_ingredients = serializers.CharField(read_only=True, allow_null=True)

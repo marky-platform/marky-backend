@@ -35,3 +35,41 @@ def validate_media_size(value):
             raise ValidationError(_("El video supera el peso máximo permitido. Máximo permitido: 80MB."))
     elif filesize > MAX_IMAGE_SIZE:
         raise ValidationError(_("La imagen supera el peso máximo permitido. Máximo permitido: 5MB."))
+
+
+MAX_MODEL_3D_SIZE = 25 * 1024 * 1024
+
+GLB_MAGIC = b'glTF'
+ZIP_MAGIC = b'PK\x03\x04'
+
+
+def _max_model_3d_label():
+    return f'{MAX_MODEL_3D_SIZE // (1024 * 1024)}MB'
+
+
+def _validate_model_3d(value, ext, magic, label):
+    """
+    Shared GLB/USDZ check: extension, size and magic bytes. Browser MIME types
+    are unreliable for these formats, so the file header is inspected instead.
+    """
+    if os.path.splitext(value.name)[1].lower() != ext:
+        raise ValidationError(_(f"El archivo {label} debe tener la extensión {ext}."))
+    if value.size > MAX_MODEL_3D_SIZE:
+        raise ValidationError(_(
+            f"El archivo {label} supera el peso máximo permitido. Máximo permitido: {_max_model_3d_label()}."
+        ))
+    try:
+        value.seek(0)
+        header = value.read(len(magic))
+    finally:
+        value.seek(0)
+    if header != magic:
+        raise ValidationError(_(f"El archivo no es un {label} válido."))
+
+
+def validate_glb_file(value):
+    _validate_model_3d(value, '.glb', GLB_MAGIC, 'GLB')
+
+
+def validate_usdz_file(value):
+    _validate_model_3d(value, '.usdz', ZIP_MAGIC, 'USDZ')

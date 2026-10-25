@@ -1,4 +1,5 @@
 import json
+import tempfile
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -8,19 +9,21 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, models, transaction
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from rest_framework import serializers
 
 from utils.tests_base import MarkyAPITestCase
 from notifications.models import Notification
 from products.filters import ProductCategoryFilter
-from products.models import Product, ProductCategory, ProductVariant, ProductAddon
+from products.models import Product, ProductCategory, ProductVariant, ProductAddon, Product3DModel
 from products.services import handle_expired_promotions_for_business
 from products import slugs as slugs_module
 from products.migrations._slug_backfill import backfill_missing_slugs
 from products.slugs import SLUG_MAX_LENGTH, slugify_name, with_suffix
-from products.validators import validate_media_extension, validate_media_size
+from products.validators import (
+    validate_media_extension, validate_media_size, validate_glb_file, validate_usdz_file,
+)
 from products.promotions import (
     compute_promotion_status,
     resolve_effective_promotion,
@@ -3511,3 +3514,265 @@ class TestPromotionTypeExclusivity(MarkyAPITestCase):
         card = self._with_products_card(product)
         self.assertEqual(Decimal(str(card['discount_percentage'])), Decimal('30'))
         self.assertFalse(card['multibuy_option'])
+
+
+# ---------------------------------------------------------------------------
+# 3D models (GLB / USDZ)
+# ---------------------------------------------------------------------------
+
+def _glb(name='model.glb', size=64):
+    return SimpleUploadedFile(name, b'glTF' + b'\x00' * size, content_type='application/octet-stream')
+
+
+def _usdz(name='model.usdz', size=64):
+    return SimpleUploadedFile(name, b'PK\x03\x04' + b'\x00' * size, content_type='application/octet-stream')
+
+
+class TestModel3DValidators(SimpleTestCase):
+
+    def test_valid_glb_and_usdz(self):
+        validate_glb_file(_glb())
+        validate_usdz_file(_usdz())
+
+    def test_header_is_rewound_after_validation(self):
+        f = _glb()
+        validate_glb_file(f)
+        self.assertEqual(f.read(4), b'glTF')
+
+    def test_wrong_extension(self):
+        with self.assertRaises(ValidationError):
+            validate_glb_file(_glb('model.gltf'))
+        with self.assertRaises(ValidationError):
+            validate_usdz_file(_usdz('model.zip'))
+
+    def test_extension_not_matching_magic_bytes(self):
+        with self.assertRaises(ValidationError):
+            validate_glb_file(_usdz('fake.glb'))
+        with self.assertRaises(ValidationError):
+            validate_usdz_file(_glb('fake.usdz'))
+
+    def test_oversized_file_rejected_with_spanish_message(self):
+        with mock.patch('products.validators.MAX_MODEL_3D_SIZE', 32):
+            with self.assertRaises(ValidationError) as ctx:
+                validate_glb_file(_glb(size=64))
+        self.assertIn('supera el peso máximo permitido', str(ctx.exception))
+
+
+class TestProductModel3DAPI(MarkyAPITestCase):
+    URL = '/api/v1/products/products/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('model3d_owner', 'model3d_owner@test.com')
+        cls.other_user, cls.other_profile = cls.make_user('model3d_other', 'model3d_other@test.com')
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        override = override_settings(MEDIA_ROOT=tmp.name)
+        override.enable()
+        self.addCleanup(override.disable)
+        self.client_a = self.auth_client(self.user)
+
+    def _base(self, **extra):
+        data = {'name': 'Con 3D', 'description': 'Desc', 'price': '10.00', 'is_active': 'true'}
+        data.update(extra)
+        return data
+
+    def _create(self, **extra):
+        response = self.client_a.post(self.URL, self._base(**extra), format='multipart')
+        self.assertEqual(response.status_code, 201, response.content)
+        return response
+
+    @staticmethod
+    def _ident(response):
+        # The create response (ProductInputSerializer) has no `id`; resolve it by name.
+        return {'id': Product.objects.get(name=response.data['name']).id}
+
+    def _patch(self, product_id, data, client=None):
+        return (client or self.client_a).patch(f'{self.URL}{product_id}/', data, format='multipart')
+
+    def _exists(self, field_file):
+        return field_file.storage.exists(field_file.name)
+
+    def test_create_with_glb_only(self):
+        response = self._create(**{'model_3d[glb_file]': _glb()})
+        model = response.data['model_3d']
+        self.assertEqual(set(model), {'id', 'glb_file', 'usdz_file'})
+        self.assertTrue(model['glb_file'].startswith('http'))
+        self.assertTrue(model['glb_file'].endswith('.glb'))
+        self.assertIsNone(model['usdz_file'])
+
+    def test_create_with_glb_and_usdz(self):
+        response = self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()})
+        self.assertTrue(response.data['model_3d']['usdz_file'].endswith('.usdz'))
+
+    def test_create_without_model_returns_null(self):
+        response = self._create()
+        self.assertIsNone(response.data['model_3d'])
+
+    def test_invalid_glb_rejected(self):
+        response = self.client_a.post(
+            self.URL, self._base(**{'model_3d[glb_file]': _usdz('fake.glb')}), format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name='Con 3D').exists())
+
+    def test_scalar_model_3d_is_400_not_500(self):
+        product_id = self._ident(self._create())['id']
+        response = self._patch(product_id, {'media[0][id]': '999', 'model_3d': 'abc'})
+        self.assertEqual(response.status_code, 400, response.content)
+
+    def test_delete_with_new_file_is_rejected(self):
+        product_id = self._ident(self._create(**{'model_3d[glb_file]': _glb()}))['id']
+        response = self._patch(product_id, {'model_3d[_delete]': 'true', 'model_3d[glb_file]': _glb('new.glb')})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertTrue(Product3DModel.objects.filter(product_id=product_id).exists())
+
+    def test_empty_usdz_value_is_ignored(self):
+        response = self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': ''})
+        self.assertIsNone(response.data['model_3d']['usdz_file'])
+
+    def test_stored_content_types_are_normalized(self):
+        response = self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()})
+        product = Product.objects.get(name='Con 3D')
+        # FileSystemStorage ignores content type, so assert on what the upload carried.
+        with mock.patch('django.core.files.storage.FileSystemStorage.save', autospec=True) as save:
+            save.side_effect = lambda storage, name, content, **kw: name
+            self._patch(product.id, {'model_3d[glb_file]': _glb('b.glb')})
+        content = save.call_args[0][2]
+        self.assertEqual(content.content_type, 'model/gltf-binary')
+
+    def test_update_adds_model(self):
+        product = self._ident(self._create())
+        response = self._patch(product['id'], {'model_3d[glb_file]': _glb()})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNotNone(response.data['model_3d'])
+        self.assertTrue(Product3DModel.objects.filter(product_id=product['id']).exists())
+
+    def test_update_replaces_glb_and_deletes_old_file(self):
+        product = self._ident(self._create(**{'model_3d[glb_file]': _glb()}))
+        model = Product3DModel.objects.get(product_id=product['id'])
+        old = model.glb_file
+        old_name = old.name
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._patch(product['id'], {'model_3d[glb_file]': _glb('new.glb')})
+        self.assertEqual(response.status_code, 200, response.content)
+        model.refresh_from_db()
+        self.assertNotEqual(model.glb_file.name, old_name)
+        self.assertTrue(self._exists(model.glb_file))
+        self.assertFalse(old.storage.exists(old_name))
+
+    def test_update_adds_and_removes_usdz(self):
+        product = self._ident(self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()}))
+        model = Product3DModel.objects.get(product_id=product['id'])
+        usdz = model.usdz_file
+        usdz_name = usdz.name
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._patch(product['id'], {'model_3d[remove_usdz]': 'true'})
+        self.assertEqual(response.status_code, 200, response.content)
+        model.refresh_from_db()
+        self.assertFalse(model.usdz_file)
+        self.assertTrue(model.glb_file)
+        self.assertFalse(usdz.storage.exists(usdz_name))
+        self.assertIsNone(response.data['model_3d']['usdz_file'])
+
+        response = self._patch(product['id'], {'model_3d[usdz_file]': _usdz('again.usdz')})
+        self.assertEqual(response.status_code, 200, response.content)
+        model.refresh_from_db()
+        self.assertTrue(model.usdz_file)
+
+    def test_update_delete_removes_model_and_files(self):
+        product = self._ident(self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()}))
+        model = Product3DModel.objects.get(product_id=product['id'])
+        glb, usdz = model.glb_file, model.usdz_file
+        glb_name, usdz_name = glb.name, usdz.name
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._patch(product['id'], {'model_3d[_delete]': 'true'})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNone(response.data['model_3d'])
+        self.assertFalse(Product3DModel.objects.filter(product_id=product['id']).exists())
+        self.assertFalse(glb.storage.exists(glb_name))
+        self.assertFalse(usdz.storage.exists(usdz_name))
+
+    def test_usdz_without_glb_and_no_model_returns_400(self):
+        product = self._ident(self._create())
+        response = self._patch(product['id'], {'model_3d[usdz_file]': _usdz()})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('glb_file', response.data['model_3d'])
+        self.assertIn('primero sube el archivo GLB', str(response.data['model_3d']['glb_file'][0]))
+        self.assertFalse(Product3DModel.objects.filter(product_id=product['id']).exists())
+
+    def test_unrelated_edit_keeps_model_files(self):
+        product = self._ident(self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()}))
+        model = Product3DModel.objects.get(product_id=product['id'])
+        names = (model.glb_file.name, model.usdz_file.name)
+        response = self._patch(product['id'], {'name': 'Renombrado'})
+        self.assertEqual(response.status_code, 200, response.content)
+        model.refresh_from_db()
+        self.assertEqual((model.glb_file.name, model.usdz_file.name), names)
+        self.assertIsNotNone(response.data['model_3d'])
+
+    def test_list_and_retrieve_include_model_3d(self):
+        with_model = self._ident(self._create(**{'model_3d[glb_file]': _glb()}))
+        without = self._ident(self._create(name='Sin 3D'))
+        listing = self.client_a.get(self.URL).data
+        rows = listing['results'] if isinstance(listing, dict) and 'results' in listing else listing
+        by_id = {row['id']: row for row in rows}
+        self.assertEqual(set(by_id[with_model['id']]['model_3d']), {'id', 'glb_file', 'usdz_file'})
+        self.assertIsNone(by_id[without['id']]['model_3d'])
+        detail = self.client_a.get(f'{self.URL}{with_model["id"]}/').data
+        self.assertTrue(detail['model_3d']['glb_file'].endswith('.glb'))
+
+    def test_public_detail_includes_model_3d(self):
+        with_model = self._ident(self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()}))
+        without = self._ident(self._create(name='Sin 3D'))
+        base = f'/api/v1/public/business/{self.profile.business_id}/products'
+        data = self.client.get(f'{base}/{with_model["id"]}/').data
+        self.assertEqual(set(data['model_3d']), {'id', 'glb_file', 'usdz_file'})
+        self.assertTrue(data['model_3d']['usdz_file'].endswith('.usdz'))
+        response = self.client.get(f'{base}/{without["id"]}/')
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNone(response.data['model_3d'])
+
+    def test_deleting_product_cascades_and_removes_files(self):
+        product = self._ident(self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()}))
+        model = Product3DModel.objects.get(product_id=product['id'])
+        glb, usdz = model.glb_file, model.usdz_file
+        glb_name, usdz_name = glb.name, usdz.name
+        self.assertTrue(glb.storage.exists(glb_name))
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client_a.delete(f'{self.URL}{product["id"]}/')
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Product3DModel.objects.filter(pk=model.pk).exists())
+        self.assertFalse(glb.storage.exists(glb_name))
+        self.assertFalse(usdz.storage.exists(usdz_name))
+
+    def test_other_business_cannot_modify_model(self):
+        product = self._ident(self._create(**{'model_3d[glb_file]': _glb()}))
+        response = self._patch(
+            product['id'], {'model_3d[_delete]': 'true'}, client=self.auth_client(self.other_user),
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Product3DModel.objects.filter(product_id=product['id']).exists())
+
+    def test_media_limits_unchanged_with_model(self):
+        data = self._base(**{'model_3d[glb_file]': _glb()})
+        for i in range(4):
+            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', b'x' * 16, content_type='image/jpeg')
+            data[f'media[{i}][media_type]'] = 'image'
+            data[f'media[{i}][order]'] = str(i)
+        response = self.client_a.post(self.URL, data, format='multipart')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('media', response.data)
+
+        data = self._base(**{'model_3d[glb_file]': _glb()})
+        for i in range(3):
+            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', b'x' * 16, content_type='image/jpeg')
+            data[f'media[{i}][media_type]'] = 'image'
+            data[f'media[{i}][order]'] = str(i)
+        response = self.client_a.post(self.URL, data, format='multipart')
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(len(response.data['media']), 3)
+        self.assertIsNotNone(response.data['model_3d'])

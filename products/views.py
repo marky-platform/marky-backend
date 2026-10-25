@@ -184,7 +184,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.is_authenticated and hasattr(user, 'business_profile'):
             handle_expired_promotions_for_business(user.business_profile)
-            return Product.objects.filter(business=user.business_profile)
+            return Product.objects.filter(business=user.business_profile).select_related('model_3d')
         return Product.objects.none()
 
     def perform_create(self, serializer):
