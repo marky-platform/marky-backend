@@ -4,7 +4,8 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from analytics.models import AnalyticsEvent
+from analytics.models import AnalyticsEvent, CatalogVisitWindow
+from analytics.services import CATALOG_VISIT_WINDOW
 
 
 class Command(BaseCommand):
@@ -27,6 +28,9 @@ class Command(BaseCommand):
         if options['dry_run']:
             self.stdout.write(f'{expired.count()} eventos expirados (anteriores a {cutoff:%Y-%m-%d}); dry-run.')
             return
+
+        # Una ventana vencida ya no deduplica nada: se descarta aunque no haya retención vencida.
+        CatalogVisitWindow.objects.filter(last_counted_at__lt=timezone.now() - CATALOG_VISIT_WINDOW).delete()
 
         total = 0
         while True:

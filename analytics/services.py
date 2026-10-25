@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from products.models import Product, ProductMedia
 
-from .models import AnalyticsEvent
+from .models import AnalyticsEvent, CatalogVisitWindow
 
 EventType = AnalyticsEvent.EventType
 
@@ -36,6 +36,48 @@ def is_bot_user_agent(user_agent):
     return bool(_BOT_UA_RE.search(user_agent))
 
 
+# Ventana fija de deduplicación de visitas al catálogo, por (negocio, visitante anónimo).
+CATALOG_VISIT_WINDOW = timedelta(hours=4)
+
+
+def normalize_source(value):
+    """Origen de una visita: `qr` solo si viene explícito; todo lo demás es Link.
+
+    Navegación directa, favoritos, valores vacíos, desconocidos o de clientes viejos
+    (`direct`/`other`) cuentan como `public_link`, así Link + QR siempre suma el total.
+    """
+    if isinstance(value, str) and value.strip().lower() == AnalyticsEvent.Source.QR:
+        return AnalyticsEvent.Source.QR
+    return AnalyticsEvent.Source.PUBLIC_LINK
+
+
+def _claim_visit(business, visitor_id, now):
+    """True si esta `catalog_visit` abre una visita nueva y debe contarse.
+
+    Debe llamarse dentro de una transacción. La fila de ventana se bloquea con
+    `select_for_update`, de modo que requests concurrentes del mismo visitante se
+    serializan: solo uno encuentra la ventana vencida. Una visita ignorada no toca
+    `last_counted_at`, así que los recargos no extienden la ventana. Usa la hora del
+    servidor, nunca la del cliente.
+    """
+    windows = CatalogVisitWindow.objects.select_for_update()
+    try:
+        window = windows.get(business=business, visitor_id=visitor_id)
+    except CatalogVisitWindow.DoesNotExist:
+        try:
+            with transaction.atomic():
+                CatalogVisitWindow.objects.create(business=business, visitor_id=visitor_id, last_counted_at=now)
+            return True
+        except IntegrityError:
+            # Otro request creó la fila entre el get y el create: reevaluar con bloqueo.
+            window = windows.get(business=business, visitor_id=visitor_id)
+    if now < window.last_counted_at + CATALOG_VISIT_WINDOW:
+        return False
+    window.last_counted_at = now
+    window.save(update_fields=['last_counted_at'])
+    return True
+
+
 # ---------------------------------------------------------------- ingesta
 
 def ingest_events(business, validated_events):
@@ -43,9 +85,10 @@ def ingest_events(business, validated_events):
 
     Devuelve `(accepted, duplicates, rejected)`. Cada fila se inserta en su propio
     savepoint: una violación de PK (event_id repetido) o de un UniqueConstraint
-    (visita/vista ya registrada en la sesión) cuenta como duplicado y no rompe la
-    transacción ni el resto del batch. Producto inexistente, de otro negocio o inactivo
-    cuenta como rechazado.
+    (vista de producto ya registrada en la sesión) cuenta como duplicado y no rompe la
+    transacción ni el resto del batch. Una `catalog_visit` dentro de la ventana de 4 h
+    del mismo visitante y negocio también es duplicado (ver `_claim_visit`). Producto
+    inexistente, de otro negocio o inactivo cuenta como rechazado.
     """
     product_ids = {e['product_id'] for e in validated_events if e.get('product_id')}
     products = {}
@@ -67,6 +110,11 @@ def ingest_events(business, validated_events):
             metadata['product_name'] = products[product_id]
         try:
             with transaction.atomic():
+                if data['type'] == EventType.CATALOG_VISIT and not _claim_visit(
+                    business, data['visitor_id'], timezone.now(),
+                ):
+                    duplicates += 1
+                    continue
                 AnalyticsEvent.objects.create(
                     id=data['event_id'],
                     business=business,
@@ -74,7 +122,7 @@ def ingest_events(business, validated_events):
                     visitor_id=data['visitor_id'],
                     session_id=data['session_id'],
                     event_type=data['type'],
-                    source=data.get('source', ''),
+                    source=normalize_source(data.get('source', '')),
                     action_type=data.get('action_type', ''),
                     engaged_ms=data.get('engaged_ms', 0),
                     client_occurred_at=data.get('occurred_at'),
@@ -113,24 +161,18 @@ def build_pulse(business, now=None, days=PULSE_DAYS, product_sort='views'):
     """Métricas del widget "Pulse" de un negocio. Días en America/Asuncion.
 
     Visitas/orígenes/acciones/top productos cubren la ventana de `days` días locales
-    (hoy incluido); `today` cubre solo el día local actual. `previous` trae los
-    totales de los `days` días anteriores para los deltas del widget.
+    (hoy incluido); `today` cubre solo el día local actual.
     """
     tz = _business_tz()
     now = now or timezone.now()
     today = now.astimezone(tz).date()
     first_day = today - timedelta(days=days - 1)
     window_start = datetime.combine(first_day, time.min, tzinfo=tz)
-    previous_start = datetime.combine(first_day - timedelta(days=days), time.min, tzinfo=tz)
     today_start = datetime.combine(today, time.min, tzinfo=tz)
 
     events = AnalyticsEvent.objects.filter(business=business)
     window = events.filter(received_at__gte=window_start, received_at__lte=now)
     visits = window.filter(event_type=EventType.CATALOG_VISIT)
-    previous = events.filter(received_at__gte=previous_start, received_at__lt=window_start).aggregate(
-        visits=Count('id', filter=Q(event_type=EventType.CATALOG_VISIT)),
-        actions=Count('id', filter=Q(event_type=EventType.ACTION_CLICK)),
-    )
 
     # Historial: visitas por fecha local, con ceros para los días sin actividad.
     per_day = {
@@ -151,9 +193,8 @@ def build_pulse(business, now=None, days=PULSE_DAYS, product_sort='views'):
 
     sources = {key: 0 for key in AnalyticsEvent.Source.values}
     for row in visits.values('source').annotate(n=Count('id')).order_by():
-        # Visitas sin source (cliente viejo / sin dato) se cuentan como directas.
-        key = row['source'] if row['source'] in sources else 'direct'
-        sources[key] += row['n']
+        # Filas viejas (direct/other/vacío) se cuentan como Link: Link + QR = total.
+        sources[normalize_source(row['source'])] += row['n']
 
     actions = {key: 0 for key in AnalyticsEvent.ActionType.values}
     for row in window.filter(event_type=EventType.ACTION_CLICK).values('action_type').annotate(n=Count('id')).order_by():
@@ -165,7 +206,6 @@ def build_pulse(business, now=None, days=PULSE_DAYS, product_sort='views'):
         'timezone': settings.TIME_ZONE,
         'days': days,
         'period': {'start': first_day.isoformat(), 'end': today.isoformat()},
-        'previous': previous,
         'today': {
             'visits': today_stats['visits'],
             'unique_visitors': today_stats['unique_visitors'],

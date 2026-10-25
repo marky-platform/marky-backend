@@ -22,6 +22,21 @@ def product_display_ordering():
     ]
 
 
+def restrict_to_visible_categories(categories, *, business, product_queryset):
+    """Keep only categories with at least one product in `product_queryset`.
+
+    Public callers pass their visibility queryset (e.g. active products), so
+    empty categories and categories whose products are all hidden never reach
+    anonymous traffic. An `Exists` semi join: no duplicate rows and no
+    DISTINCT, so the categories keep their `order` and stay paginatable.
+    """
+    visible_products = product_queryset.filter(
+        business=business,
+        category=models.OuterRef('pk'),
+    )
+    return categories.filter(models.Exists(visible_products))
+
+
 def build_catalog_payload(*, business, request, query_params, paginator=None,
                            serializer_class, product_queryset=None):
     """Build the categories+products catalog payload for a business.
@@ -45,6 +60,14 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
     pagination keys mixed in when `paginator` produced a page.
     """
     base_qs = ProductCategory.objects.filter(business=business)
+    if product_queryset is not None:
+        # Anonymous catalogs must not expose empty categories or categories
+        # whose products are all hidden. Keep the authenticated/admin behavior
+        # unchanged by applying this only when the caller supplied its public
+        # product visibility queryset.
+        base_qs = restrict_to_visible_categories(
+            base_qs, business=business, product_queryset=product_queryset,
+        )
     category_filter = ProductCategoryFilter(query_params, queryset=base_qs, product_queryset=product_queryset)
     filtered_qs = category_filter.qs
     has_promotion = bool(category_filter.form.cleaned_data.get('has_promotion'))

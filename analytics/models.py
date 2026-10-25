@@ -22,8 +22,6 @@ class AnalyticsEvent(models.Model):
     class Source(models.TextChoices):
         PUBLIC_LINK = "public_link", "Public link"
         QR = "qr", "QR"
-        DIRECT = "direct", "Direct"
-        OTHER = "other", "Other"
 
     class ActionType(models.TextChoices):
         LOCATION = "location", "Location"
@@ -68,11 +66,8 @@ class AnalyticsEvent(models.Model):
             models.Index(fields=['received_at'], name='ae_received_idx'),
         ]
         constraints = [
-            models.UniqueConstraint(
-                fields=['business', 'session_id', 'event_type'],
-                condition=Q(event_type='catalog_visit'),
-                name='ae_unique_catalog_visit_per_session',
-            ),
+            # La visita al catálogo ya no se deduplica por sesión: la ventana de 4 h por
+            # (negocio, visitante) vive en `CatalogVisitWindow`.
             models.UniqueConstraint(
                 fields=['business', 'product', 'session_id', 'event_type'],
                 condition=Q(event_type='product_view'),
@@ -105,3 +100,29 @@ class AnalyticsEvent(models.Model):
 
     def __str__(self):
         return f"{self.event_type} {self.business_id} {self.id}"
+
+
+class CatalogVisitWindow(models.Model):
+    """Última visita contada de un visitante anónimo en un negocio.
+
+    Es la fuente de verdad de la deduplicación de 4 horas: una nueva `catalog_visit`
+    solo cuenta si pasaron al menos `CATALOG_VISIT_WINDOW` desde `last_counted_at`.
+    La fila se bloquea (`select_for_update`) al evaluar, así que dos requests
+    simultáneos del mismo visitante no pueden contar dos visitas.
+    """
+
+    business = models.ForeignKey(BusinessProfile, on_delete=models.CASCADE, related_name='analytics_visit_windows')
+    visitor_id = models.UUIDField()
+    last_counted_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['business', 'visitor_id'], name='cvw_unique_business_visitor'),
+        ]
+        indexes = [
+            # Para purgar ventanas vencidas junto con la retención de eventos.
+            models.Index(fields=['last_counted_at'], name='cvw_last_counted_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.business_id} {self.visitor_id} {self.last_counted_at:%Y-%m-%d %H:%M}"

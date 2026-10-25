@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from business.public_views import get_business_or_404
-from .catalog import build_catalog_payload
+from .catalog import build_catalog_payload, restrict_to_visible_categories
 from .models import Product
 from .serializers import ProductCategoryBasicSerializer, ProductCategoryWithProductsSerializer
 from .public_serializers import PublicProductSerializer
@@ -65,7 +65,11 @@ class PublicCategoryListView(generics.ListAPIView):
 
     def get_queryset(self):
         business = get_business_or_404(self.kwargs['business_id'])
-        return business.product_categories.all()
+        return restrict_to_visible_categories(
+            business.product_categories.all(),
+            business=business,
+            product_queryset=_active_products(),
+        )
 
 
 def _public_product_response(request, business, **lookup):
