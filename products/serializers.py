@@ -204,23 +204,21 @@ class Product3DModelSerializer(serializers.ModelSerializer):
         fields = ['id', 'glb_file', 'usdz_file']
 
 
-def _parse_bool(value):
-    if isinstance(value, str):
-        return value.strip().lower() in ('true', '1')
-    return value
-
-
 class Product3DModelInputSerializer(serializers.Serializer):
-    glb_file = serializers.FileField(required=False, validators=[validate_glb_file])
-    usdz_file = serializers.FileField(required=False, validators=[validate_usdz_file])
+    # An empty file value (model_3d[usdz_file]=, as '' or None) means "not sent".
+    glb_file = serializers.FileField(required=False, allow_null=True, validators=[validate_glb_file])
+    usdz_file = serializers.FileField(required=False, allow_null=True, validators=[validate_usdz_file])
     remove_usdz = serializers.BooleanField(required=False, default=False)
     _delete = serializers.BooleanField(required=False, default=False)
 
     def to_internal_value(self, data):
-        data = data.copy()
-        for flag in ('remove_usdz', '_delete'):
-            if flag in data:
-                data[flag] = _parse_bool(data[flag])
+        # A scalar model_3d (e.g. model_3d=abc) must be a 400, not a 500.
+        if not isinstance(data, Mapping):
+            raise serializers.ValidationError('Formato inválido para el modelo 3D.')
+        data = {
+            key: value for key, value in data.items()
+            if not (key in ('glb_file', 'usdz_file') and value in ('', None))
+        }
         return super().to_internal_value(data)
 
 
@@ -776,6 +774,14 @@ class ProductInputSerializer(serializers.ModelSerializer):
         model_3d_data = attrs.get('model_3d')
         if (
             model_3d_data
+            and model_3d_data.get('_delete')
+            and (model_3d_data.get('glb_file') or model_3d_data.get('usdz_file'))
+        ):
+            raise serializers.ValidationError({
+                'model_3d': ['No se puede eliminar el modelo 3D y subir archivos a la vez.']
+            })
+        if (
+            model_3d_data
             and not model_3d_data.get('_delete')
             and model_3d_data.get('usdz_file')
             and not model_3d_data.get('glb_file')
@@ -868,6 +874,9 @@ class ProductInputSerializer(serializers.ModelSerializer):
         """
         if not data:
             return
+        # Lock the product row so concurrent saves (double submit, two tabs)
+        # serialize here instead of racing on the OneToOne insert/replace.
+        Product.objects.select_for_update().filter(pk=product.pk).exists()
         model = Product3DModel.objects.filter(product=product).first()
 
         if data.get('_delete'):

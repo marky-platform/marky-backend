@@ -3619,6 +3619,21 @@ class TestProductModel3DAPI(MarkyAPITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Product.objects.filter(name='Con 3D').exists())
 
+    def test_scalar_model_3d_is_400_not_500(self):
+        product_id = self._ident(self._create())['id']
+        response = self._patch(product_id, {'media[0][id]': '999', 'model_3d': 'abc'})
+        self.assertEqual(response.status_code, 400, response.content)
+
+    def test_delete_with_new_file_is_rejected(self):
+        product_id = self._ident(self._create(**{'model_3d[glb_file]': _glb()}))['id']
+        response = self._patch(product_id, {'model_3d[_delete]': 'true', 'model_3d[glb_file]': _glb('new.glb')})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertTrue(Product3DModel.objects.filter(product_id=product_id).exists())
+
+    def test_empty_usdz_value_is_ignored(self):
+        response = self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': ''})
+        self.assertIsNone(response.data['model_3d']['usdz_file'])
+
     def test_stored_content_types_are_normalized(self):
         response = self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()})
         product = Product.objects.get(name='Con 3D')
