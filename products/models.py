@@ -310,3 +310,14 @@ class ProductMedia(models.Model):
 
     class Meta:
         ordering = ['media_type', 'order']
+
+
+class Product3DModel(models.Model):
+    product = models.OneToOneField(Product, on_delete=models.CASCADE, related_name='model_3d')
+    glb_file = models.FileField(upload_to='product_3d/')
+    usdz_file = models.FileField(upload_to='product_3d/', null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.product.name} - 3D'

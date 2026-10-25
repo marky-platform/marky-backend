@@ -5,8 +5,11 @@ from django.db import transaction, IntegrityError
 from decimal import Decimal
 
 from . import product_extras
-from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia
-from .validators import validate_media_extension, validate_media_size
+from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia, Product3DModel
+from .signals import delete_stored_files_on_commit
+from .validators import (
+    validate_media_extension, validate_media_size, validate_glb_file, validate_usdz_file,
+)
 from .promotions import (
     PROMOTION_TYPE_CONFLICT_MESSAGE,
     promotion_type_conflict,
@@ -195,6 +198,32 @@ class ProductMediaInputSerializer(serializers.ModelSerializer):
         return super().to_internal_value(data)
 
 
+class Product3DModelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Product3DModel
+        fields = ['id', 'glb_file', 'usdz_file']
+
+
+def _parse_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ('true', '1')
+    return value
+
+
+class Product3DModelInputSerializer(serializers.Serializer):
+    glb_file = serializers.FileField(required=False, validators=[validate_glb_file])
+    usdz_file = serializers.FileField(required=False, validators=[validate_usdz_file])
+    remove_usdz = serializers.BooleanField(required=False, default=False)
+    _delete = serializers.BooleanField(required=False, default=False)
+
+    def to_internal_value(self, data):
+        data = data.copy()
+        for flag in ('remove_usdz', '_delete'):
+            if flag in data:
+                data[flag] = _parse_bool(data[flag])
+        return super().to_internal_value(data)
+
+
 class DeletableNestedItemMixin:
     """Lets a nested child row be sent as a bare tombstone: {id, _delete: true}.
 
@@ -315,6 +344,7 @@ class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
     variants = ProductVariantSerializer(many=True, read_only=True)
     addons = ProductAddonSerializer(many=True, read_only=True)
     media = ProductMediaSerializer(many=True, read_only=True)
+    model_3d = Product3DModelSerializer(read_only=True, allow_null=True)
     category = ProductCategoryLiteSerializer(read_only=True)
     # Category promotion fields (read-only, sourced from related ProductCategory)
     category_multibuy_option = serializers.CharField(source='category.multibuy_option', read_only=True, allow_null=True)
@@ -336,7 +366,7 @@ class ProductSerializer(ProductPriceMixin, serializers.ModelSerializer):
             'category_promotion_status',
             'stopper', 'multibuy_option', 'discount_percentage', 'is_available',
             'promotion_starts_at', 'promotion_ends_at', 'promotion_status', 'business',
-            'variants', 'addons', 'media',
+            'variants', 'addons', 'media', 'model_3d',
             'featured_ingredients', 'presentation', 'allergens', 'celiac_info',
             # Human-readable prices for the business context
             'primary_price', 'secondary_price',
@@ -569,6 +599,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
     variants = ProductVariantInputSerializer(many=True, required=False)
     addons = ProductAddonInputSerializer(many=True, required=False)
     media = ProductMediaInputSerializer(many=True, required=False)
+    model_3d = Product3DModelInputSerializer(required=False, allow_null=True)
     description = serializers.CharField(max_length=300)
     category = serializers.PrimaryKeyRelatedField(
         queryset=ProductCategory.objects.none(), required=False, allow_null=True
@@ -585,7 +616,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
             'name', 'description', 'price', 'category', 'is_active',
             'stopper', 'multibuy_option', 'discount_percentage',
             'promotion_starts_at', 'promotion_ends_at',
-            'variants', 'addons', 'media', 'is_available',
+            'variants', 'addons', 'media', 'model_3d', 'is_available',
             'featured_ingredients', 'presentation', 'allergens', 'celiac_info',
         ]
 
@@ -608,7 +639,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
     # empty-string convention, which only fires for genuine QueryDicts.
     _CLEARABLE_PROMOTION_FIELDS = (
         'multibuy_option', 'promotion_starts_at', 'promotion_ends_at',
-        'presentation', 'celiac_info',
+        'presentation', 'celiac_info', 'model_3d',
     )
     # Free-text CSV fields: only "" clears ("null"/"none" may be a real value).
     _CLEARABLE_CSV_FIELDS = ('featured_ingredients', 'allergens')
@@ -633,6 +664,16 @@ class ProductInputSerializer(serializers.ModelSerializer):
                 elif isinstance(raw, int):
                     data[field] = str(raw)
         return super().to_internal_value(data)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        # Re-query instead of reading the reverse accessor: it may be cached
+        # from before _apply_model_3d created/deleted the row.
+        model_3d = Product3DModel.objects.filter(product=instance).first()
+        ret['model_3d'] = (
+            Product3DModelSerializer(model_3d, context=self.context).data if model_3d else None
+        )
+        return ret
 
     def validate_featured_ingredients(self, value):
         return product_extras.normalize_featured_ingredients(value)
@@ -731,6 +772,25 @@ class ProductInputSerializer(serializers.ModelSerializer):
                     'discount_percentage': 'Debes seleccionar Descuento u Oferta para activar la promoción.'
                 })
 
+        # A USDZ is only an add-on to a GLB: it can't start a model on its own.
+        model_3d_data = attrs.get('model_3d')
+        if (
+            model_3d_data
+            and not model_3d_data.get('_delete')
+            and model_3d_data.get('usdz_file')
+            and not model_3d_data.get('glb_file')
+        ):
+            has_model = (
+                self.instance is not None
+                and Product3DModel.objects.filter(product=self.instance).exists()
+            )
+            if not has_model:
+                raise serializers.ValidationError({
+                    'model_3d': {
+                        'glb_file': ['Para agregar el archivo USDZ primero sube el archivo GLB.']
+                    }
+                })
+
         # media is the full desired gallery state (existing items kept/updated,
         # new items, and items flagged `_delete`); when omitted entirely
         # (e.g. a PATCH that doesn't touch the gallery) there's nothing to
@@ -762,6 +822,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
         variants_data = validated_data.pop('variants', [])
         addons_data = validated_data.pop('addons', [])
         media_data = validated_data.pop('media', [])
+        model_3d_data = validated_data.pop('model_3d', None)
 
         try:
             # Nested atomic = savepoint: on IntegrityError, only this insert
@@ -794,13 +855,63 @@ class ProductInputSerializer(serializers.ModelSerializer):
                 media_item.pop('_delete')
             ProductMedia.objects.create(product=product, **media_item)
 
+        self._apply_model_3d(product, model_3d_data)
+
         return product
+
+    @staticmethod
+    def _apply_model_3d(product, data):
+        """Create/replace/clear/delete the product's 3D model from `model_3d`.
+
+        Omitted (None) leaves the stored model untouched. Replaced or cleared
+        files are removed from storage once the transaction commits.
+        """
+        if not data:
+            return
+        model = Product3DModel.objects.filter(product=product).first()
+
+        if data.get('_delete'):
+            if model is not None:
+                model.delete()  # post_delete signal removes the stored files
+            return
+
+        glb_file = data.get('glb_file')
+        usdz_file = data.get('usdz_file')
+        remove_usdz = data.get('remove_usdz')
+        if not (glb_file or usdz_file or remove_usdz):
+            return
+
+        old_files = []
+        if glb_file:
+            glb_file.content_type = 'model/gltf-binary'
+        if usdz_file:
+            usdz_file.content_type = 'model/vnd.usdz+zip'
+
+        if model is None:
+            if not glb_file:
+                return  # validate() rejects a USDZ without a GLB; nothing to clear
+            model = Product3DModel(product=product)
+        else:
+            if glb_file and model.glb_file:
+                old_files.append(model.glb_file.name)
+            if (usdz_file or remove_usdz) and model.usdz_file:
+                old_files.append(model.usdz_file.name)
+
+        if glb_file:
+            model.glb_file = glb_file
+        if usdz_file:
+            model.usdz_file = usdz_file
+        elif remove_usdz:
+            model.usdz_file = None
+        model.save()
+        delete_stored_files_on_commit(model.glb_file.storage, old_files)
 
     @transaction.atomic
     def update(self, instance, validated_data):
         variants_data = validated_data.pop('variants', [])
         addons_data = validated_data.pop('addons', [])
         media_data = validated_data.pop('media', [])
+        model_3d_data = validated_data.pop('model_3d', None)
 
         try:
             with transaction.atomic():
@@ -866,6 +977,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
         process_related(ProductVariant, instance.variants, variants_data)
         process_related(ProductAddon, instance.addons, addons_data)
         process_related(ProductMedia, instance.media, media_data)
+        self._apply_model_3d(instance, model_3d_data)
 
         return instance
 
