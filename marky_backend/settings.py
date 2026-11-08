@@ -244,6 +244,10 @@ POST_OFFICE = {
 # Retención de filas de correo ya procesadas (guardan códigos/enlaces): comando `purge_mail`.
 MAIL_RETENTION_HOURS = env.int('MAIL_RETENTION_HOURS', default=24)
 
+# Tope de categorías por negocio (F-28). Las listas de categorías no se paginan,
+# así que este tope acota el tamaño de sus respuestas.
+MAX_CATEGORIES_PER_BUSINESS = env.int('MAX_CATEGORIES_PER_BUSINESS', default=100)
+
 FRONTEND_URL = env.str('FRONTEND_URL', 'http://localhost:3000')
 
 if not DEBUG:

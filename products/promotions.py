@@ -15,6 +15,20 @@ active. `products/filters.py` docs this as the canonical definition of
 """
 from django.utils import timezone
 
+# Regla de borde ÚNICA para categorías y productos (F-29): el inicio es
+# INCLUSIVO (starts_at <= ahora => ya empezó) y el fin es EXCLUSIVO
+# (ahora >= ends_at => finalizó). Todas las comparaciones usan datetimes con
+# zona horaria (USE_TZ), nunca naive. `compute_promotion_status`, el barrido
+# `services._expired_promotion_candidates` y `filters._promotion_active_q`
+# deben respetarla; el hook del front `usePromotionCountdown` (diff <= 0)
+# coincide con ella.
+PROMOTION_WINDOW_ORDER_MESSAGE = 'La fecha de fin debe ser posterior a la fecha de inicio.'
+
+
+def promotion_window_is_invalid(starts_at, ends_at):
+    """True when both bounds are set and the end is not strictly after the start."""
+    return bool(starts_at and ends_at and starts_at >= ends_at)
+
 ACTIVE = 'active'
 SCHEDULED = 'scheduled'
 EXPIRED = 'expired'

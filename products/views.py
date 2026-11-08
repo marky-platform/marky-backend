@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import transaction, models
 from django_filters import rest_framework as filters
 
@@ -12,10 +13,12 @@ from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
 from .filters import ProductCategoryFilter, product_has_active_promotion_q
+from business.models import BusinessProfile
 from .models import ProductCategory, ProductVariant, ProductAddon
 from .models import Product, next_product_order
 from .services import handle_expired_promotions_for_business
 from .catalog import build_catalog_payload
+from .pagination import AllResultsPagination
 from .serializers import (
     ProductCategoryBasicSerializer,
     ProductCategoryWithProductsSerializer,
@@ -48,6 +51,8 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsBusinessOrSuperAdmin]
     serializer_class = ProductCategoryBasicSerializer
     queryset = ProductCategory.objects.all()
+    # F-28: las categorías nunca se truncan por PAGE_SIZE (el tope por negocio las acota).
+    pagination_class = AllResultsPagination
 
     def get_base_queryset(self):
         user = self.request.user
@@ -82,8 +87,19 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         business = self.request.user.business_profile
-        max_order = ProductCategory.objects.filter(business=business).aggregate(models.Max('order'))['order__max'] or 0
-        serializer.save(business=business, order=max_order + 1)
+        limit = settings.MAX_CATEGORIES_PER_BUSINESS
+        # Chequeo del tope + cálculo de order + creación en una sola transacción,
+        # serializada por negocio bloqueando su fila de BusinessProfile; así dos
+        # creaciones concurrentes no pueden pasar ambas el chequeo (SQLite ignora el lock).
+        with transaction.atomic():
+            BusinessProfile.objects.select_for_update().get(pk=business.pk)
+            if ProductCategory.objects.filter(business=business).count() >= limit:
+                raise serializers.ValidationError({
+                    'error': f'Alcanzaste el máximo de {limit} categorías por negocio. '
+                             'Elimina alguna para crear una nueva.'
+                })
+            max_order = ProductCategory.objects.filter(business=business).aggregate(models.Max('order'))['order__max'] or 0
+            serializer.save(business=business, order=max_order + 1)
 
     @extend_schema(
         request=ProductCategoryOrderUpdateSerializer,

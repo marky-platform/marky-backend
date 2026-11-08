@@ -149,6 +149,10 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
             serialized_data = _serialize(page)
             paginated_response = paginator.get_paginated_response(serialized_data)
             result = paginated_response.data
+            if products_without_category.exists():
+                # El grupo sintético "Sin categoría" se añade a results: `count`
+                # debe contarlo para que coincida con len(results).
+                result['count'] += 1
             result['products_count'] = products_count
             if filter_counts is not None:
                 result['filter_counts'] = filter_counts

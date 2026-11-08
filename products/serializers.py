@@ -13,7 +13,9 @@ from .validators import (
 )
 from .promotions import (
     PROMOTION_TYPE_CONFLICT_MESSAGE,
+    PROMOTION_WINDOW_ORDER_MESSAGE,
     promotion_type_conflict,
+    promotion_window_is_invalid,
     resolve_effective_promotion,
     compute_promotion_status,
     ACTIVE as PROMOTION_ACTIVE,
@@ -335,6 +337,16 @@ class ProductVariantInputSerializer(DeletableNestedItemMixin, serializers.ModelS
         return attrs
 
 
+def validate_category_promotion_window(attrs, instance):
+    """Inicio < fin para categorías, resuelto contra lo guardado en actualizaciones parciales."""
+    if 'promotion_starts_at' not in attrs and 'promotion_ends_at' not in attrs:
+        return
+    starts_at = attrs.get('promotion_starts_at', getattr(instance, 'promotion_starts_at', None))
+    ends_at = attrs.get('promotion_ends_at', getattr(instance, 'promotion_ends_at', None))
+    if promotion_window_is_invalid(starts_at, ends_at):
+        raise serializers.ValidationError({'promotion_ends_at': PROMOTION_WINDOW_ORDER_MESSAGE})
+
+
 class ProductCategoryLiteSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
@@ -358,6 +370,7 @@ class ProductCategoryBasicSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, attrs):
+        validate_category_promotion_window(attrs, self.instance)
         # One promotion type per row. Only evaluated when this request touches
         # a type field, so an unrelated save of a legacy row still goes through.
         if 'multibuy_option' in attrs or 'discount_percentage' in attrs:
@@ -576,6 +589,7 @@ class PromotionSerializer(serializers.ModelSerializer):
         fields = ['multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at']
 
     def validate(self, attrs):
+        validate_category_promotion_window(attrs, self.instance)
         # Same rule as ProductInputSerializer: a promotion window with no
         # discount/multibuy type configured is a no-op, so reject it when
         # this request is the one setting the dates.
@@ -780,9 +794,9 @@ class ProductInputSerializer(serializers.ModelSerializer):
         # (see products/promotions.py), so past end dates are valid.
         starts_at = attrs.get('promotion_starts_at', getattr(self.instance, 'promotion_starts_at', None))
         ends_at = attrs.get('promotion_ends_at', getattr(self.instance, 'promotion_ends_at', None))
-        if starts_at and ends_at and starts_at >= ends_at:
+        if promotion_window_is_invalid(starts_at, ends_at):
             raise serializers.ValidationError({
-                'promotion_ends_at': 'La fecha de fin debe ser posterior a la fecha de inicio.'
+                'promotion_ends_at': PROMOTION_WINDOW_ORDER_MESSAGE
             })
 
         # A promotion window (dates) with no actual discount/multibuy type is
