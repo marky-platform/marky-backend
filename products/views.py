@@ -1,20 +1,17 @@
 from django.conf import settings
 from django.db import transaction, models
-from django_filters import rest_framework as filters
 
 from drf_spectacular.utils import extend_schema, OpenApiParameter, extend_schema_view
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-import json
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import FormParser
 from utils.parsers import TextPreservingNestedMultiPartParser
 from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
-from .filters import ProductCategoryFilter, product_has_active_promotion_q
 from business.models import BusinessProfile
-from .models import ProductCategory, ProductVariant, ProductAddon
+from .models import ProductCategory
 from .models import Product, next_product_order
 from .services import handle_expired_promotions_for_business
 from .catalog import build_catalog_payload
@@ -236,6 +233,10 @@ class ProductViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         new_category = serializer.validated_data.get('category', serializer.instance.category)
         if new_category is not None and new_category != serializer.instance.category:
-            serializer.save(order=next_product_order(new_category))
+            # Mismo lock por categoría que `perform_create`: dos movidas/altas concurrentes
+            # a la misma categoría no deben recibir el mismo `order` (SQLite ignora el lock).
+            with transaction.atomic():
+                ProductCategory.objects.select_for_update().get(pk=new_category.pk)
+                serializer.save(order=next_product_order(new_category))
         else:
             serializer.save()

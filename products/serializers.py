@@ -546,11 +546,14 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     def _first_image(self, obj):
         # Una sola consulta por producto para `image` e `image_thumbnail`.
         if not hasattr(obj, '_first_image_media'):
-            # F-22: `.all()` respeta el prefetch de `media` (ordenado por Meta); filtrar en Python
-            # evita una consulta por producto.
-            obj._first_image_media = next(
-                (m for m in obj.media.all() if m.media_type == ProductMedia.IMAGE), None,
-            )
+            # F-22: con `media` prefetcheado se filtra en Python (sin consultas extra); sin prefetch
+            # una sola consulta LIMIT 1 evita cargar todas las filas (incl. videos) por producto.
+            if 'media' in getattr(obj, '_prefetched_objects_cache', {}):
+                obj._first_image_media = next(
+                    (m for m in obj.media.all() if m.media_type == ProductMedia.IMAGE), None,
+                )
+            else:
+                obj._first_image_media = obj.media.filter(media_type=ProductMedia.IMAGE).first()
         return obj._first_image_media
 
     def get_image(self, obj):

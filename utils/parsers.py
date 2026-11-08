@@ -3,10 +3,10 @@ import re
 from drf_nested_forms.parsers import NestedMultiPartParser
 from rest_framework.parsers import DataAndFiles
 
-# Claves de texto libre (de primer nivel o dentro de variants/addons) cuyo valor
+# Claves de texto libre (de primer nivel, incl. allergens/featured_ingredients, o dentro de variants/addons) cuyo valor
 # nunca debe coercionarse: drf_nested_forms convierte "007" en 7, "true" en True
 # y "null" en None cuando el request trae claves anidadas.
-_TEXT_KEY = re.compile(r'^(?:(?:variants|addons)\[(?P<index>\d+)\]\[(?P<nested>name|description)\]|(?P<top>name|description))$')
+_TEXT_KEY = re.compile(r'^(?:(?:variants|addons)\[(?P<index>\d+)\]\[(?P<nested>name|description)\]|(?P<top>name|description|allergens|featured_ingredients))$')
 _NESTED_LISTS = ('variants', 'addons')
 
 
