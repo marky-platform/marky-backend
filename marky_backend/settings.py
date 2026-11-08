@@ -31,6 +31,17 @@ SECRET_KEY = env.str("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env.bool("DEBUG", default=False)
 
+SENTRY_DSN = env.str('SENTRY_DSN', default='')
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        send_default_pii=False,
+    )
+
 ALLOWED_HOSTS = env.list("HOST", default=["*"])
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -312,16 +323,23 @@ LOGGING = {
     'disable_existing_loggers': False,
     'handlers': {
         'console': {
-            'level': env.str('LOGGING_LEVEL', default='DEBUG'),
+            'level': LOGGING_LEVEL,
             'class': 'logging.StreamHandler',
+LOGGING_LEVEL = env.str('LOGGING_LEVEL', default='INFO')
+
         },
     },
-    # 'loggers': {
-    #     'django.db.backends': {
-    #         'level': env.bool('LOGGING_DB_LEVEL', default='DEBUG'),
-    #         'handlers': ['console'],
-    #     },
-    # },
+    'root': {
+        'handlers': ['console'],
+        'level': LOGGING_LEVEL,
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console'],
+            'level': LOGGING_LEVEL,
+            'propagate': False,
+        },
+    },
 }
 
 # Analytics propio (app `analytics`)

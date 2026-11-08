@@ -1,9 +1,6 @@
-import logging
-
 from django.db import transaction, models
 from django_filters import rest_framework as filters
 
-logger = logging.getLogger(__name__)
 from drf_spectacular.utils import extend_schema, OpenApiParameter, extend_schema_view
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import viewsets, status
@@ -94,17 +91,30 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['post'])
     def update_order(self, request):
-        # TODO: let's see if we can optimize this w/bulk update
-        categories_data = request.data.get('categories', [])
+        serializer = ProductCategoryOrderUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        categories_data = serializer.validated_data['categories']
+        category_ids = [category_data['id'] for category_data in categories_data]
 
-        try:
-            with transaction.atomic():
-                for category_data in categories_data:
-                    ProductCategory.objects.filter(id=category_data['id']).update(order=category_data['order'])
-        except Exception:
-            logger.exception("Error updating category order for user %s", request.user.id)
-            return Response({'error': 'Ha ocurrido un error inesperado.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(category_ids) != len(set(category_ids)):
+            return Response(
+                {'error': 'La lista de categorías no puede contener IDs duplicados.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
+        categories = list(self.get_queryset().filter(id__in=category_ids))
+        if len(categories) != len(category_ids):
+            return Response(
+                {'error': 'Una o más categorías no pertenecen a este negocio.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        orders_by_id = {category_data['id']: category_data['order'] for category_data in categories_data}
+        for category in categories:
+            category.order = orders_by_id[category.id]
+
+        with transaction.atomic():
+            ProductCategory.objects.bulk_update(categories, ['order'])
         return Response({'status': 'Order updated successfully'}, status=status.HTTP_200_OK)
 
     @extend_schema(
