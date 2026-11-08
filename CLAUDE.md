@@ -47,7 +47,8 @@ Every business-scoped view filters its queryset by the requesting user's profile
 ### Auth & permissions
 
 - JWT via `djangorestframework-simplejwt` (`Authorization: Bearer ...`). Both Session and JWT auth are enabled.
-- Email verification uses a 6-digit code **embedded as a claim inside a short-lived JWT** (not stored in the DB) — see `users/views.py` `RegisterView`/`VerifyEmailView`. Emails are sent through `post_office` (DB-queued; flush with `send_queued_mail`).
+- Tokens: access 30 min, refresh 30 days with rotation + `token_blacklist`. `POST /users/logout/` blacklists the refresh token (access tokens stay valid until they expire). `CHECK_REVOKE_TOKEN: True` embeds a `hash_password` claim, so a password change (`PasswordChangeView`) also kills previously issued access tokens (401) and blacklists all outstanding refresh tokens; tokens minted via `RefreshToken.for_user` carry the claim automatically.
+- Email verification uses a 6-digit code stored on the user (`User.verification_code`, with `verification_attempts` and a lockout after 5 failed attempts) — see `users/views.py` `RegisterView`/`VerifyEmailView`. Emails are sent through `post_office` (DB-queued; flush with `send_queued_mail`).
 - `utils/permissions.py::IsBusinessOrSuperAdmin` gates business/product endpoints — it checks membership in the Django **group named `business`** (users are auto-added to this group on register) or `is_superuser`.
 
 ### Multi-currency pricing

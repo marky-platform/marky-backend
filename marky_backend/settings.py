@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     'post_office',
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'drf_spectacular',
     'cities_light',
     'users',
@@ -232,11 +233,15 @@ CORS_EXPOSE_HEADERS = [
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=90),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,
-    # 'token_blacklist' isn't in INSTALLED_APPS, so BLACKLIST_AFTER_ROTATION would be a no-op if True.
-    'BLACKLIST_AFTER_ROTATION': False,
+    # Al rotar, el refresh token anterior queda en la blacklist (app token_blacklist).
+    'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': False,
+    # Los tokens llevan el claim 'hash_password' (REVOKE_TOKEN_CLAIM); si cambia la contraseña,
+    # los access tokens emitidos antes dejan de valer (401). El logout no invalida access tokens.
+    'CHECK_REVOKE_TOKEN': True,
+    'REVOKE_TOKEN_CLAIM': 'hash_password',
 
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
@@ -283,7 +288,9 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'auth': '10/minute',
         'resend': '3/minute',
+        'verify': '5/minute',
         'recovery': '5/minute',
+        'refresh': '30/minute',
         'public': '60/minute',
         'analytics': '120/minute',
     },
@@ -318,6 +325,8 @@ SPECTACULAR_SETTINGS = {
     ],
 }
 
+LOGGING_LEVEL = env.str('LOGGING_LEVEL', default='INFO')
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -325,8 +334,6 @@ LOGGING = {
         'console': {
             'level': LOGGING_LEVEL,
             'class': 'logging.StreamHandler',
-LOGGING_LEVEL = env.str('LOGGING_LEVEL', default='INFO')
-
         },
     },
     'root': {

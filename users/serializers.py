@@ -4,9 +4,16 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes
+from django.utils.translation import gettext_lazy as _
 from post_office import mail
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+from rest_framework_simplejwt.tokens import RefreshToken
 User = get_user_model()
 
 
@@ -28,6 +35,21 @@ class UserRegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Este correo ya está registrado.")
         return value
 
+    def validate(self, attrs):
+        # La contraseña se valida aquí para que falle en is_valid() (400 con clave `password`)
+        password = attrs.get("password")
+        if password:
+            candidate = User(
+                username=attrs.get("email"),
+                email=attrs.get("email"),
+                business_name=attrs.get("business_name", ""),
+            )
+            try:
+                validate_password(password, candidate)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError({"password": list(e.messages)})
+        return attrs
+
     def create(self, validated_data):
         password = validated_data.pop("password", None)
 
@@ -36,10 +58,6 @@ class UserRegisterSerializer(serializers.ModelSerializer):
 
         user = User(**validated_data)
         if password:
-            try:
-                validate_password(password, user)
-            except DjangoValidationError as e:
-                raise serializers.ValidationError({"password": list(e.messages)})
             user.set_password(password)
         user.save()
 
@@ -127,3 +145,35 @@ class PasswordChangeSerializer(serializers.Serializer):
             raise serializers.ValidationError({"new_password": list(e.messages)})
         user.set_password(new_password)
         user.save()
+        revoke_user_tokens(user)
+
+
+def revoke_user_tokens(user):
+    """Pone en la blacklist todos los refresh tokens vigentes del usuario (cierra todas sus sesiones)."""
+    pendientes = OutstandingToken.objects.filter(
+        user=user,
+        expires_at__gt=timezone.now(),
+        blacklistedtoken__isnull=True,
+    )
+    BlacklistedToken.objects.bulk_create(
+        [BlacklistedToken(token=token) for token in pendientes],
+        ignore_conflicts=True,
+    )
+
+
+class ActiveUserTokenRefreshSerializer(TokenRefreshSerializer):
+    """Refresca el token solo si el usuario sigue existiendo y activo."""
+
+    def validate(self, attrs):
+        try:
+            refresh = RefreshToken(attrs['refresh'])
+            user = User.objects.get(pk=refresh.get(api_settings.USER_ID_CLAIM))
+        except (TokenError, User.DoesNotExist):
+            raise InvalidToken(_("Token inválido o expirado"))
+        if not user.is_active:
+            raise InvalidToken(_("Usuario inactivo"))
+        return super().validate(attrs)
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField()

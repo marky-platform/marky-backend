@@ -1,6 +1,6 @@
+import hmac
 import logging
-import random
-import string
+import secrets
 from datetime import timedelta
 
 from django.contrib.auth import authenticate, get_user_model
@@ -16,16 +16,25 @@ from rest_framework import status
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import (
     TokenRefreshView, )
 
 from marky_backend import settings
 from users.serializers import UserRegisterSerializer, UserLoginSerializer, VerifyEmailSerializer, \
-    PasswordRecoverySerializer, PasswordChangeSerializer, ResendVerificationSerializer, UserSerializer
+    PasswordRecoverySerializer, PasswordChangeSerializer, ResendVerificationSerializer, UserSerializer, \
+    ActiveUserTokenRefreshSerializer, LogoutSerializer
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+
+MAX_VERIFICATION_ATTEMPTS = 5
+
+
+def generate_verification_code():
+    """Código de 6 dígitos generado con un CSPRNG."""
+    return ''.join(secrets.choice('0123456789') for _ in range(6))
 
 
 @extend_schema(tags=['Auth'])
@@ -47,10 +56,12 @@ class RegisterView(generics.CreateAPIView):
                 if business_group:
                     business_group.user_set.add(user)
 
-                verification_code = ''.join(random.choices(string.digits, k=6))
+                verification_code = generate_verification_code()
                 user.verification_code = verification_code
                 user.verification_code_expires_at = timezone.now() + timedelta(minutes=15)
-                user.save(update_fields=['verification_code', 'verification_code_expires_at'])
+                user.verification_attempts = 0
+                user.save(update_fields=['verification_code', 'verification_code_expires_at',
+                                         'verification_attempts'])
 
                 verification_link = f"{settings.FRONTEND_URL}/verify-email/"
                 mail.send(
@@ -108,11 +119,31 @@ class LoginView(generics.GenericAPIView):
 @extend_schema(tags=['Auth'])
 class CustomTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
+    throttle_scope = 'refresh'
+    serializer_class = ActiveUserTokenRefreshSerializer
+
+
+@extend_schema(tags=['Auth'], responses={204: None})
+class LogoutView(generics.GenericAPIView):
+    """Pone el refresh token en la blacklist. Idempotente: un token inválido o ya revocado también responde 204."""
+    permission_classes = [AllowAny]
+    throttle_scope = 'auth'
+    serializer_class = LogoutSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            RefreshToken(serializer.validated_data['refresh']).blacklist()
+        except TokenError:
+            pass
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @extend_schema(tags=['Auth'])
 class VerifyEmailView(generics.GenericAPIView):
     permission_classes = [AllowAny]
+    throttle_scope = 'verify'
     serializer_class = VerifyEmailSerializer
 
     def post(self, request, *args, **kwargs):
@@ -131,15 +162,29 @@ class VerifyEmailView(generics.GenericAPIView):
             return Response({"detail": "Este usuario ya se encuentra verificado."}, status=status.HTTP_400_BAD_REQUEST)
 
         now = timezone.now()
-        if (user.verification_code != verification_code
+        stored_code = user.verification_code
+        if (not stored_code
                 or user.verification_code_expires_at is None
-                or user.verification_code_expires_at < now):
+                or user.verification_code_expires_at < now
+                or user.verification_attempts >= MAX_VERIFICATION_ATTEMPTS):
+            return Response({"message": "Código inválido o expirado."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not hmac.compare_digest(stored_code.encode(), verification_code.encode()):
+            user.verification_attempts += 1
+            if user.verification_attempts >= MAX_VERIFICATION_ATTEMPTS:
+                # Demasiados intentos fallidos: se invalida el código (hay que pedir uno nuevo)
+                user.verification_code = None
+                user.verification_code_expires_at = None
+            user.save(update_fields=['verification_attempts', 'verification_code',
+                                     'verification_code_expires_at'])
             return Response({"message": "Código inválido o expirado."}, status=status.HTTP_400_BAD_REQUEST)
 
         user.is_verified = True
         user.verification_code = None
         user.verification_code_expires_at = None
-        user.save(update_fields=['is_verified', 'verification_code', 'verification_code_expires_at'])
+        user.verification_attempts = 0
+        user.save(update_fields=['is_verified', 'verification_code', 'verification_code_expires_at',
+                                 'verification_attempts'])
 
         return Response({"message": "Correo verificado con éxito."}, status=status.HTTP_200_OK)
 
@@ -170,10 +215,12 @@ class ResendVerificationView(generics.GenericAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        verification_code = ''.join(random.choices(string.digits, k=6))
+        verification_code = generate_verification_code()
         user.verification_code = verification_code
         user.verification_code_expires_at = timezone.now() + timedelta(minutes=15)
-        user.save(update_fields=['verification_code', 'verification_code_expires_at'])
+        user.verification_attempts = 0
+        user.save(update_fields=['verification_code', 'verification_code_expires_at',
+                                 'verification_attempts'])
 
         verification_link = f"{settings.FRONTEND_URL}/verify-email/"
         mail.send(
