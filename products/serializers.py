@@ -653,6 +653,12 @@ class ProductInputSerializer(serializers.ModelSerializer):
             'variants', 'addons', 'media', 'model_3d', 'is_available',
             'featured_ingredients', 'presentation', 'allergens', 'celiac_info',
         ]
+        # DRF >= 3.18 turns single-field *conditional* UniqueConstraints
+        # (unique_*_stopper_per_category) into UniqueTogetherValidators that
+        # force `category` to be required. It is optional here and the
+        # favorite/recommended stopper conflict is checked in _stopper_conflict,
+        # so keep the pre-3.18 behaviour of no auto-generated validators.
+        validators = []
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

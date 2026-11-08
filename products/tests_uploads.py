@@ -281,7 +281,8 @@ class TestStorageOptions(SimpleTestCase):
         base = pathlib.Path(__file__).resolve().parent.parent
         flags = ['--worker-class gthread', '--threads 4', '--timeout 120',
                  '--max-requests 1000', '--max-requests-jitter 100']
-        text = (base / 'Dockerfile').read_text()
+        # The Dockerfile CMD spans lines with trailing backslash continuations.
+        text = (base / 'Dockerfile').read_text().replace('\\\n', '\n')
         docker = ' '.join(json.loads(text[text.index('CMD ') + 4:]))
         railway = json.loads((base / 'railway.json').read_text())['deploy']['startCommand']
         for flag in flags:

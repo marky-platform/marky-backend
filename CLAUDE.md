@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Stack
 
-Django 5.1 + Django REST Framework backend for "Marky", a multi-tenant platform where each business (commercial or entrepreneur) manages a profile, branches, products, and promotions. Primary language of the domain/UI strings is Spanish; `LANGUAGE_CODE = 'es'`, timezone `America/Asuncion`.
+Django 5.2 LTS + Django REST Framework backend for "Marky", a multi-tenant platform where each business (commercial or entrepreneur) manages a profile, branches, products, and promotions. Primary language of the domain/UI strings is Spanish; `LANGUAGE_CODE = 'es'`, timezone `America/Asuncion`.
 
 ## Commands
 
@@ -65,6 +65,12 @@ Both `ProductCategory` and `Product` carry the same promotion fields (`multibuy_
 ### File uploads / nested forms
 
 DRF is configured globally with `drf_nested_forms` parsers (`NestedMultiPartParser`, `NestedJSONParser`) before the standard `FormParser`. This lets multipart requests carry nested structures (e.g. a product plus its variants/media/addons and their image files in one request). Product write views use `ProductInputSerializer` for create/update and `ProductSerializer` for reads (`get_serializer_class` switches by action). Image uploads are validated by `business/validators.py` (≤2MB, jpg/jpeg/png/gif). Product media/variant images are sniffed by magic bytes (`utils/uploads.py`, `products/validators.py`) and the stored Content-Type and `media_type` derive from the validated extension, never from the client. Nested lists per product are capped (`MAX_VARIANTS`/`MAX_ADDONS`/`MAX_MEDIA_ITEMS` = 20 rows; gallery 3 images + 1 video, computed over the final state). Files of deleted/replaced Product media, variants, 3D models and business profile images are removed after commit by `utils/storage_cleanup.py` (errors logged, files still referenced elsewhere are kept). R2 storage options live in `marky_backend/storage_config.py` (`AWS_S3_CUSTOM_DOMAIN` gives unsigned URLs).
+
+### Dependencies & container
+- Every line in `requirements.txt` is pinned with `==` (no ranges, no hashes). Local env is Python 3.10, the Dockerfile uses `python:3.11.18-slim-bookworm`: any new pin must support both. Pillow is held at 12.x because Pillow 13 requires Python >= 3.11.
+- DRF >= 3.18 auto-builds validators from single-field conditional `UniqueConstraint`s, which made `category` required on `ProductInputSerializer`; that serializer sets `Meta.validators = []` to keep the old behaviour (stopper conflicts are checked in `_stopper_conflict`). Re-check this when bumping DRF.
+- The image runs as non-root user `app` (uid 10001); `/app/media` and `/app/staticfiles` are owned by it. `collectstatic` at build time needs placeholder prod env vars (see Dockerfile) because settings fail closed with `DEBUG=False`.
+- Audit with `pip-audit` from a throwaway venv outside the project env (`pip-audit -r requirements.txt --no-deps --disable-pip`).
 
 ## API docs
 
