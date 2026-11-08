@@ -35,6 +35,9 @@ from products.promotions import (
 
 User = get_user_model()
 
+# Cabecera JPEG mínima: la validación por magic bytes exige contenido real.
+_JPEG_HEADER = b'\xff\xd8\xff\xe0'
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — no database, test model methods in isolation
@@ -929,7 +932,7 @@ class TestProductMediaUploadAPI(MarkyAPITestCase):
 
     def test_valid_image_accepted_by_api(self):
         client = self.auth_client(self.user)
-        good_file = SimpleUploadedFile('photo.jpg', b'x' * 1024, content_type='image/jpeg')
+        good_file = SimpleUploadedFile('photo.jpg', _JPEG_HEADER + b'x' * 1024, content_type='image/jpeg')
         response = client.post(
             '/api/v1/products/products/', self._create_payload(good_file), format='multipart',
         )
@@ -3812,7 +3815,7 @@ class TestProductModel3DAPI(MarkyAPITestCase):
     def test_media_limits_unchanged_with_model(self):
         data = self._base(**{'model_3d[glb_file]': _glb()})
         for i in range(4):
-            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', b'x' * 16, content_type='image/jpeg')
+            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', _JPEG_HEADER + b'x' * 16, content_type='image/jpeg')
             data[f'media[{i}][media_type]'] = 'image'
             data[f'media[{i}][order]'] = str(i)
         response = self.client_a.post(self.URL, data, format='multipart')
@@ -3821,7 +3824,7 @@ class TestProductModel3DAPI(MarkyAPITestCase):
 
         data = self._base(**{'model_3d[glb_file]': _glb()})
         for i in range(3):
-            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', b'x' * 16, content_type='image/jpeg')
+            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', _JPEG_HEADER + b'x' * 16, content_type='image/jpeg')
             data[f'media[{i}][media_type]'] = 'image'
             data[f'media[{i}][order]'] = str(i)
         response = self.client_a.post(self.URL, data, format='multipart')

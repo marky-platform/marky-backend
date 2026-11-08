@@ -6,9 +6,10 @@ from decimal import Decimal
 
 from . import product_extras
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia, Product3DModel
-from .signals import delete_stored_files_on_commit
+from utils.uploads import file_extension, force_content_type, EXTENSION_TYPES
 from .validators import (
-    validate_media_extension, validate_media_size, validate_glb_file, validate_usdz_file,
+    validate_media_extension, validate_media_size, validate_media_content, validate_glb_file, validate_usdz_file,
+    validate_image_extension_only, validate_image_content,
 )
 from .promotions import (
     PROMOTION_TYPE_CONFLICT_MESSAGE,
@@ -179,12 +180,27 @@ class ProductMediaSerializer(serializers.ModelSerializer):
         fields = ['id', 'file', 'media_type', 'order']
 
 
+# Límites de las listas anidadas de un producto (filas por request, incluidas
+# las marcadas `_delete`). La galería final se limita aparte (3 imágenes, 1 video).
+MAX_VARIANTS = 20
+MAX_ADDONS = 20
+MAX_MEDIA_ITEMS = 20
+MAX_GALLERY_IMAGES = 3
+MAX_GALLERY_VIDEOS = 1
+
+
+def _media_type_for_file(file):
+    """Tipo de media (image/video) derivado de la extensión ya validada del archivo."""
+    content_type = EXTENSION_TYPES[file_extension(file)][1]
+    return ProductMedia.VIDEO if content_type.startswith('video/') else ProductMedia.IMAGE
+
+
 class ProductMediaInputSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
     file = serializers.FileField(
         required=False,
         allow_null=True,
-        validators=[validate_media_extension, validate_media_size],
+        validators=[validate_media_extension, validate_media_size, validate_media_content],
     )
     _delete = serializers.BooleanField(required=False, default=False)
 
@@ -196,6 +212,20 @@ class ProductMediaInputSerializer(serializers.ModelSerializer):
         if "_delete" in data and isinstance(data["_delete"], str):
             data["_delete"] = data["_delete"].lower() in ("true", "1")
         return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        file = attrs.get('file')
+        if file:
+            # El tipo y el Content-Type guardados salen del archivo validado,
+            # nunca de lo que declare el cliente.
+            attrs['media_type'] = _media_type_for_file(file)
+            force_content_type(file)
+        else:
+            attrs.pop('media_type', None)
+            # Un elemento nuevo marcado `_delete` se ignora (create() lo omite): no exige archivo.
+            if not attrs.get('id') and not attrs.get('_delete'):
+                raise serializers.ValidationError({'file': 'El archivo es requerido para cada elemento nuevo de la galería.'})
+        return attrs
 
 
 class Product3DModelSerializer(serializers.ModelSerializer):
@@ -274,7 +304,10 @@ class ProductVariantSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
 
 class ProductVariantInputSerializer(DeletableNestedItemMixin, serializers.ModelSerializer):
-    image = serializers.ImageField(required=False)
+    image = serializers.ImageField(
+        required=False,
+        validators=[validate_image_extension_only, validate_media_size, validate_image_content],
+    )
     id = serializers.IntegerField(required=False)
     _delete = serializers.BooleanField(required=False, default=False)
 
@@ -597,9 +630,9 @@ class RawJSONField(serializers.JSONField):
 
 
 class ProductInputSerializer(serializers.ModelSerializer):
-    variants = ProductVariantInputSerializer(many=True, required=False)
-    addons = ProductAddonInputSerializer(many=True, required=False)
-    media = ProductMediaInputSerializer(many=True, required=False)
+    variants = ProductVariantInputSerializer(many=True, required=False, max_length=MAX_VARIANTS)
+    addons = ProductAddonInputSerializer(many=True, required=False, max_length=MAX_ADDONS)
+    media = ProductMediaInputSerializer(many=True, required=False, max_length=MAX_MEDIA_ITEMS)
     model_3d = Product3DModelInputSerializer(required=False, allow_null=True)
     description = serializers.CharField(max_length=300)
     category = serializers.PrimaryKeyRelatedField(
@@ -806,22 +839,32 @@ class ProductInputSerializer(serializers.ModelSerializer):
         # check. Images and videos cap independently.
         media_data = attrs.get('media')
         if media_data is not None:
-            remaining_media = [item for item in media_data if not item.get('_delete')]
-            image_count = sum(
-                1 for item in remaining_media
-                if item.get('media_type', ProductMedia.IMAGE) == ProductMedia.IMAGE
-            )
-            video_count = sum(
-                1 for item in remaining_media
-                if item.get('media_type') == ProductMedia.VIDEO
-            )
-            if image_count > 3:
+            # La cuota se calcula sobre el estado final: las filas existentes que
+            # el payload no menciona se conservan (process_related no las borra),
+            # así que cuentan igual que las nuevas.
+            final_types = {}
+            if self.instance is not None:
+                final_types = {m.id: m.media_type for m in self.instance.media.all()}
+            new_types = []
+            for item in media_data:
+                item_id = item.get('id')
+                if item_id:
+                    if item_id not in final_types:
+                        continue  # id ajeno/inexistente: process_related lo ignora
+                    if item.get('_delete'):
+                        del final_types[item_id]
+                    elif item.get('media_type'):
+                        final_types[item_id] = item['media_type']
+                elif not item.get('_delete'):
+                    new_types.append(item.get('media_type', ProductMedia.IMAGE))
+            all_types = list(final_types.values()) + new_types
+            if all_types.count(ProductMedia.IMAGE) > MAX_GALLERY_IMAGES:
                 raise serializers.ValidationError({
-                    'media': 'No se pueden tener más de 3 imágenes en la galería.'
+                    'media': f'No se pueden tener más de {MAX_GALLERY_IMAGES} imágenes en la galería.'
                 })
-            if video_count > 1:
+            if all_types.count(ProductMedia.VIDEO) > MAX_GALLERY_VIDEOS:
                 raise serializers.ValidationError({
-                    'media': 'No se puede tener más de 1 video en la galería.'
+                    'media': f'No se puede tener más de {MAX_GALLERY_VIDEOS} video en la galería.'
                 })
 
         return attrs
@@ -860,8 +903,9 @@ class ProductInputSerializer(serializers.ModelSerializer):
             ProductAddon.objects.create(product=product, **addon_data)
 
         for media_item in media_data:
-            if '_delete' in media_item:
-                media_item.pop('_delete')
+            if media_item.get('_delete'):
+                continue  # en create no hay nada que borrar
+            media_item = {k: v for k, v in media_item.items() if k not in ('id', '_delete')}
             ProductMedia.objects.create(product=product, **media_item)
 
         self._apply_model_3d(product, model_3d_data)
@@ -893,7 +937,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
         if not (glb_file or usdz_file or remove_usdz):
             return
 
-        old_files = []
         if glb_file:
             glb_file.content_type = 'model/gltf-binary'
         if usdz_file:
@@ -903,11 +946,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
             if not glb_file:
                 return  # validate() rejects a USDZ without a GLB; nothing to clear
             model = Product3DModel(product=product)
-        else:
-            if glb_file and model.glb_file:
-                old_files.append(model.glb_file.name)
-            if (usdz_file or remove_usdz) and model.usdz_file:
-                old_files.append(model.usdz_file.name)
+        # Los archivos reemplazados o quitados los borra storage_cleanup tras el commit.
 
         if glb_file:
             model.glb_file = glb_file
@@ -916,7 +955,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
         elif remove_usdz:
             model.usdz_file = None
         model.save()
-        delete_stored_files_on_commit(model.glb_file.storage, old_files)
 
     @transaction.atomic
     def update(self, instance, validated_data):

@@ -205,20 +205,10 @@ STORAGES = {
     },
 }
 
+from .storage_config import build_r2_storage  # noqa: E402
+
 if env.str("AWS_ACCESS_KEY_ID", default=None):
-    STORAGES["default"] = {
-        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-        "OPTIONS": {
-            "access_key": env.str("AWS_ACCESS_KEY_ID"),
-            "secret_key": env.str("AWS_SECRET_ACCESS_KEY"),
-            "bucket_name": env.str("AWS_STORAGE_BUCKET_NAME"),
-            "endpoint_url": env.str("AWS_S3_ENDPOINT_URL"),
-            "region_name": env.str("AWS_S3_REGION_NAME", default="auto"),
-            "signature_version": "s3v4",
-            "file_overwrite": False,
-            "default_acl": None,
-        },
-    }
+    STORAGES["default"] = build_r2_storage(lambda name: env.str(name, default=None))
     _r2_custom_domain = env.str("AWS_S3_CUSTOM_DOMAIN", default=None)
     if _r2_custom_domain:
         MEDIA_URL = f"https://{_r2_custom_domain}/"
