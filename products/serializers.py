@@ -179,7 +179,7 @@ class ProductPriceMixin:
 class ProductMediaSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductMedia
-        fields = ['id', 'file', 'media_type', 'order']
+        fields = ['id', 'file', 'thumbnail', 'media_type', 'order']
 
 
 # Límites de las listas anidadas de un producto (filas por request, incluidas
@@ -441,6 +441,7 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     isFavorite = serializers.SerializerMethodField()
     isRecommended = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
+    image_thumbnail = serializers.SerializerMethodField()
     # Promotion fields: resolved (product-overrides-category, as one atomic
     # bundle) via resolve_effective_promotion — see _get_promotion_bundle.
     multibuy_option = serializers.SerializerMethodField()
@@ -456,7 +457,7 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ['id', 'name', 'slug', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
+        fields = ['id', 'name', 'slug', 'description', 'price', 'isFavorite', 'isRecommended', 'image', 'image_thumbnail',
                   'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at',
                   'promotion_status', 'is_available',
                   'primary_price', 'secondary_price',
@@ -538,14 +539,24 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     def get_isRecommended(self, obj):
         return obj.stopper == 'RECOMMENDED'
 
-    def get_image(self, obj):
+    def _media_url(self, file):
         request = self.context.get('request')
-        media = obj.media.filter(media_type=ProductMedia.IMAGE).first()
-        if media and request:
-            return request.build_absolute_uri(media.file.url)
-        elif media:
-            return media.file.url
-        return None
+        return request.build_absolute_uri(file.url) if request else file.url
+
+    def _first_image(self, obj):
+        # Una sola consulta por producto para `image` e `image_thumbnail`.
+        if not hasattr(obj, '_first_image_media'):
+            obj._first_image_media = obj.media.filter(media_type=ProductMedia.IMAGE).first()
+        return obj._first_image_media
+
+    def get_image(self, obj):
+        media = self._first_image(obj)
+        return self._media_url(media.file) if media else None
+
+    def get_image_thumbnail(self, obj):
+        # Miniatura de la misma imagen que `image`; None si aún no existe (el cliente usa `image`).
+        media = self._first_image(obj)
+        return self._media_url(media.thumbnail) if media and media.thumbnail else None
 
     def get_multibuy_option(self, obj):
         bundle = self._get_promotion_bundle(obj)

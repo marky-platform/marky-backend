@@ -21,7 +21,7 @@ class PublicProductVariantSerializer(ProductPriceMixin, serializers.ModelSeriali
 
     class Meta:
         model = ProductVariant
-        fields = ['id', 'name', 'price', 'description', 'image', 'primary_price', 'secondary_price']
+        fields = ['id', 'name', 'price', 'description', 'image', 'thumbnail', 'primary_price', 'secondary_price']
 
 
 class PublicProductAddonSerializer(ProductPriceMixin, serializers.ModelSerializer):
