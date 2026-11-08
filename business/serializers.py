@@ -432,8 +432,8 @@ class AccountInfoSerializer(serializers.Serializer):
 
 class AccountInfoUpdateSerializer(serializers.Serializer):
     # User fields
+    # `email` es de solo lectura: no se puede modificar desde este endpoint.
     business_name = serializers.CharField(required=False)
-    email = serializers.EmailField(required=False)
     phone_number = serializers.CharField(required=False, allow_blank=True)
 
     # BusinessProfile flat fields
@@ -483,15 +483,11 @@ class AccountInfoUpdateSerializer(serializers.Serializer):
 
         # Update user fields
         business_name = validated_data.pop('business_name', None)
-        email = validated_data.pop('email', None)
         phone_number = validated_data.pop('phone_number', None)
 
         user_changed = False
         if business_name is not None:
             user.business_name = business_name
-            user_changed = True
-        if email is not None:
-            user.email = email
             user_changed = True
         if phone_number is not None:
             user.phone_number = phone_number

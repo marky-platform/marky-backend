@@ -119,6 +119,37 @@ class TestBusinessIdReservedWords(MarkyAPITestCase):
         self.assertEqual(profile.business_id, 'biz_reserved_rename')
 
 
+class AccountInfoEmailReadOnlyTests(MarkyAPITestCase):
+    """El email de la cuenta es de solo lectura: el PATCH ignora la clave
+    `email` (nunca cambia user.email ni username), pero el resto de campos
+    se siguen actualizando en la misma peticion."""
+
+    URL = '/api/v1/business/account-info/'
+
+    def test_patch_ignores_email_but_updates_other_fields(self):
+        user, _ = self.make_user('biz_email_ro', 'biz_email_ro@test.com')
+        original_username = user.username
+        client = self.auth_client(user)
+        response = client.patch(self.URL, {
+            'email': 'otro@test.com',
+            'phone_number': '+595981000111',
+            'business_name': 'Nuevo Nombre',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        user.refresh_from_db()
+        self.assertEqual(user.email, 'biz_email_ro@test.com')
+        self.assertEqual(user.username, original_username)
+        self.assertEqual(user.phone_number, '+595981000111')
+        self.assertEqual(user.business_name, 'Nuevo Nombre')
+        self.assertEqual(response.data['email'], 'biz_email_ro@test.com')
+
+    def test_get_still_returns_email(self):
+        user, _ = self.make_user('biz_email_get', 'biz_email_get@test.com')
+        response = self.auth_client(user).get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['email'], 'biz_email_get@test.com')
+
+
 class SocialMediaLinksReplaceTests(MarkyAPITestCase):
     """Coverage for POST /business/social-media-links/bulk-update/, the
     full-replacement endpoint backing the Canales modal."""
