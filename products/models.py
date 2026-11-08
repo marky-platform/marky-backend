@@ -56,7 +56,7 @@ class ProductCategory(SlugAllocationMixin, models.Model):
     class Meta:
         verbose_name = "Product Category"
         verbose_name_plural = "Product Categories"
-        ordering = ['order']
+        ordering = ['order', 'id']
         constraints = [
             models.UniqueConstraint(
                 fields=['business', 'slug'],

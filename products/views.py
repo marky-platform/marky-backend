@@ -8,7 +8,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 import json
 from rest_framework.parsers import MultiPartParser, FormParser
-from drf_nested_forms.parsers import NestedMultiPartParser
+from utils.parsers import TextPreservingNestedMultiPartParser
 from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
@@ -173,8 +173,9 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
         category = self.get_object()
         serializer = self.get_serializer(category, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
+            category = serializer.save()
+            # F-39: respuesta con la categoría completa (id/name/icon que lee el modal).
+            return Response(ProductCategoryBasicSerializer(category, context=self.get_serializer_context()).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @extend_schema(
@@ -202,7 +203,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 class ProductViewSet(viewsets.ModelViewSet):
     permission_classes = [IsBusinessOrSuperAdmin]
     queryset = Product.objects.all()
-    parser_classes = (NestedMultiPartParser, FormParser)
+    parser_classes = (TextPreservingNestedMultiPartParser, FormParser)
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -213,13 +214,24 @@ class ProductViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.is_authenticated and hasattr(user, 'business_profile'):
             handle_expired_promotions_for_business(user.business_profile)
-            return Product.objects.filter(business=user.business_profile).select_related('model_3d')
+            # F-22: sin estos prefetch el listado cuesta ~4 consultas por producto.
+            return (
+                Product.objects.filter(business=user.business_profile)
+                .select_related('category', 'model_3d')
+                .prefetch_related('variants', 'addons', 'media')
+                .order_by('id')  # orden estable para la paginación
+            )
         return Product.objects.none()
 
     def perform_create(self, serializer):
         category = serializer.validated_data.get('category')
-        extra = {'order': next_product_order(category)} if category is not None else {}
-        serializer.save(business=self.request.user.business_profile, **extra)
+        # F-37: el cálculo de `order` y el guardado van en una transacción serializada por
+        # categoría (SQLite ignora el lock); así dos altas concurrentes no reciben el mismo orden.
+        with transaction.atomic():
+            if category is not None:
+                ProductCategory.objects.select_for_update().get(pk=category.pk)
+            extra = {'order': next_product_order(category)} if category is not None else {}
+            serializer.save(business=self.request.user.business_profile, **extra)
 
     def perform_update(self, serializer):
         new_category = serializer.validated_data.get('category', serializer.instance.category)
