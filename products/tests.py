@@ -2130,7 +2130,7 @@ class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
         self.assertIn(self.user, notification.recipients.all())
 
     def test_product_name_truncated_at_20_chars_in_notification(self):
-        product = self._expired_product(name='A Very Long Product Name That Exceeds The Limit')
+        self._expired_product(name='A Very Long Product Name That Exceeds The Limit')
         client = self.auth_client(self.user)
 
         client.get('/api/v1/products/products/')
@@ -2238,7 +2238,7 @@ class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
         self.assertEqual(Notification.objects.count(), 0)
 
     def test_no_promo_configured_untouched(self):
-        product = Product.objects.create(
+        Product.objects.create(
             name='Plain Product', description='Desc', price=Decimal('10.00'),
             business=self.profile,
         )
@@ -3690,7 +3690,7 @@ class TestProductModel3DAPI(MarkyAPITestCase):
         self.assertIsNone(response.data['model_3d']['usdz_file'])
 
     def test_stored_content_types_are_normalized(self):
-        response = self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()})
+        self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()})
         product = Product.objects.get(name='Con 3D')
         # FileSystemStorage ignores content type, so assert on what the upload carried.
         with mock.patch('django.core.files.storage.FileSystemStorage.save', autospec=True) as save:

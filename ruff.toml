@@ -1,0 +1,6 @@
+# Linter conservador: solo pyflakes (F) y errores de sintaxis/runtime (E9). Sin reglas de formato.
+target-version = "py311"
+extend-exclude = ["env", "migrations", "media", "cities"]
+
+[lint]
+select = ["F", "E9"]

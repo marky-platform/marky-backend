@@ -9,7 +9,6 @@ from django.db import transaction
 from django.test import SimpleTestCase, override_settings
 from PIL import Image
 
-from business.models import BusinessProfile
 from products.models import Product, ProductCategory, ProductMedia, ProductVariant
 from utils.tests_base import MarkyAPITestCase
 

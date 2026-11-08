@@ -20,6 +20,7 @@ python manage.py test products          # single app
 python manage.py test products.tests.SomeTest.test_method   # single test
 python manage.py cities_light           # download/import city & country data (PY, VE)
 python manage.py send_queued_mail       # flush the post_office email queue
+ruff check .                            # lint (ruff.toml: pyflakes F + E9 only; CI runs it)
 python manage.py createcachetable       # one-off: creates the `django_cache` table (DatabaseCache; idempotent)
 ```
 
@@ -70,6 +71,7 @@ DRF is configured globally with `drf_nested_forms` parsers (`NestedMultiPartPars
 - Every line in `requirements.txt` is pinned with `==` (no ranges, no hashes). Local env is Python 3.10, the Dockerfile uses `python:3.11.18-slim-bookworm`: any new pin must support both. Pillow is held at 12.x because Pillow 13 requires Python >= 3.11.
 - DRF >= 3.18 auto-builds validators from single-field conditional `UniqueConstraint`s, which made `category` required on `ProductInputSerializer`; that serializer sets `Meta.validators = []` to keep the old behaviour (stopper conflicts are checked in `_stopper_conflict`). Re-check this when bumping DRF.
 - The image runs as non-root user `app` (uid 10001); `/app/media` and `/app/staticfiles` are owned by it. `collectstatic` at build time needs placeholder prod env vars (see Dockerfile) because settings fail closed with `DEBUG=False`.
+- CI (`.github/workflows/ci.yml`): ruff, `check`, `makemigrations --check --dry-run`, `test` (against a PostGIS service container: `Branch.location` is a geography field, so the suite does NOT run on SQLite), `pip-audit` (non-blocking while Pillow 13 advisories are open). `.github/dependabot.yml` ignores Pillow major bumps. Secret scan: `.gitleaks.toml` + `secret-scan.yml`.
 - Audit with `pip-audit` from a throwaway venv outside the project env (`pip-audit -r requirements.txt --no-deps --disable-pip`).
 
 ## API docs

@@ -22,7 +22,6 @@ from business.serializers import BusinessCategorySerializer, CurrencySerializer,
     BranchLocationsReplaceResponseSerializer
 from rest_framework.permissions import AllowAny
 from utils.permissions import IsBusinessOrSuperAdmin
-from .models import BusinessProfile
 from business.serializers import AccountInfoSerializer, AccountInfoUpdateSerializer
 
 

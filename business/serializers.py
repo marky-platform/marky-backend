@@ -1,7 +1,6 @@
 import re
 from decimal import Decimal
 
-from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from business.models import BusinessCategory, Currency, BusinessProfile, SocialMediaLink, BranchAttribute, Branch
 from .validators import validate_image_size, validate_image_extension

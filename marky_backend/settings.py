@@ -434,6 +434,6 @@ CITIES_LIGHT_TRANSLATION_LANGUAGES = ['es']
 CITIES_LIGHT_INCLUDE_COUNTRIES = ['PY', 'VE']
 
 try:
-    from marky_backend.local_settings import *
+    from marky_backend.local_settings import *  # noqa: F403 (override local opcional)
 except ImportError:
     pass
