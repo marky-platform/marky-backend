@@ -239,7 +239,10 @@ class DeletableNestedItemMixin:
                 flag = flag.strip().lower() in ('true', '1')
             item_id = data.get('id')
             if flag and item_id not in (None, ''):
-                return {'id': int(item_id), '_delete': True}
+                try:
+                    return {'id': int(item_id), '_delete': True}
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({'id': 'Un número entero válido es requerido.'})
         return super().to_internal_value(data)
 
 

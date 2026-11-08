@@ -167,7 +167,10 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['get'], serializer_class=ProductCategoryWithProductsSerializer)
     def with_products(self, request):
-        business = self.request.user.business_profile
+        business = getattr(self.request.user, 'business_profile', None)
+        if business is None:
+            # Usuario sin perfil: catálogo vacío en lugar de un 500.
+            return Response({'products_count': 0, 'results': []})
         handle_expired_promotions_for_business(business)
         payload = build_catalog_payload(
             business=business,

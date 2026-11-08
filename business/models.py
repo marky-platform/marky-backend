@@ -1,6 +1,9 @@
 import os
+from decimal import Decimal
 
+from django.core.validators import MinValueValidator
 from django.db import models
+from django.db.models.functions import Lower
 from django.contrib.auth import get_user_model
 from cities_light.models import City
 from django.contrib.gis.db import models as gis_models
@@ -50,7 +53,10 @@ class BusinessProfile(models.Model):
     secondary_currency = models.ForeignKey(Currency, on_delete=models.SET_NULL,
                                            null=True, blank=True, related_name='secondary_businesses')
 
-    exchange_rate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    exchange_rate = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
     # Indicates the direction of the exchange:
     # True: exchange_rate is interpreted as "1 primary currency unit equals exchange_rate secondary currency units"
     # False: exchange_rate is interpreted as "1 secondary currency unit equals exchange_rate primary currency units"
@@ -82,6 +88,15 @@ class BusinessProfile(models.Model):
     class Meta:
         verbose_name = 'Business Profile'
         verbose_name_plural = 'Business Profiles'
+        constraints = [
+            # business_id es el slug público: la unicidad no distingue mayúsculas.
+            models.UniqueConstraint(Lower('business_id'), name='business_id_lower_unique'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.business_id:
+            self.business_id = self.business_id.lower()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.business_id} - {self.user}"

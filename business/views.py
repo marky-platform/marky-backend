@@ -5,7 +5,7 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter
 from rest_framework import generics, filters
 from rest_framework import mixins, viewsets
 from rest_framework import status
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -50,6 +50,8 @@ class BusinessProfileViewSet(mixins.CreateModelMixin,
         return BusinessProfileWriteSerializer
 
     def perform_create(self, serializer):
+        if BusinessProfile.objects.filter(user=self.request.user).exists():
+            raise ValidationError({'detail': 'Este usuario ya tiene un perfil de negocio.'})
         serializer.save(user=self.request.user)
 
 

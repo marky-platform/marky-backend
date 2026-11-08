@@ -3828,3 +3828,32 @@ class TestProductModel3DAPI(MarkyAPITestCase):
         self.assertEqual(response.status_code, 201, response.content)
         self.assertEqual(len(response.data['media']), 3)
         self.assertIsNotNone(response.data['model_3d'])
+
+
+class TestMinor500s(MarkyAPITestCase):
+    """F-38: with_products sin perfil y tombstones con id no numérico deben dar 4xx, no 500."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.no_profile_user, _ = cls.make_user('noprofile', 'noprofile@test.com', with_profile=False)
+        cls.user, cls.profile = cls.make_user('tomb_tenant', 'tomb@test.com')
+
+    def test_with_products_without_profile_returns_empty_not_500(self):
+        client = self.auth_client(self.no_profile_user)
+        response = client.get('/api/v1/products/product-categories/with_products/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['results'], [])
+
+    def test_tombstone_with_non_numeric_id_returns_400(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        for prefix in ('addons', 'variants'):
+            response = client.patch(
+                f'/api/v1/products/products/{product.id}/',
+                {f'{prefix}[0][id]': 'abc', f'{prefix}[0][_delete]': 'true'},
+                format='multipart',
+            )
+            self.assertEqual(response.status_code, 400, prefix)

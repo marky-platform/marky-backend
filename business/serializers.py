@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal
 
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -24,6 +25,41 @@ RESERVED_BUSINESS_IDS = {
 }
 
 
+def validate_business_id_value(value, instance=None):
+    """Validador único de business_id para crear y actualizar.
+
+    Exige minúsculas/regex, largo 4-24, que no sea reservado y unicidad
+    insensible a mayúsculas (excluyendo `instance` al actualizar).
+    """
+    if value.lower() in RESERVED_BUSINESS_IDS:
+        raise serializers.ValidationError('Este nombre de usuario no está disponible.')
+    if not re.match(r'^[a-z0-9\-_]+$', value):
+        raise serializers.ValidationError(
+            'Solo se permiten letras minúsculas, números, guiones (-) y guiones bajos (_).'
+        )
+    if len(value) < 4 or len(value) > 24:
+        raise serializers.ValidationError('Debe tener entre 4 y 24 caracteres.')
+    existing = BusinessProfile.objects.filter(business_id__iexact=value)
+    if instance is not None:
+        existing = existing.exclude(pk=instance.pk)
+    if existing.exists():
+        raise serializers.ValidationError('Este nombre de usuario ya existe.')
+    return value
+
+
+def validate_exchange_config(secondary_currency, exchange_rate):
+    """Moneda secundaria exige tasa > 0; sin moneda secundaria no hay tasa."""
+    if secondary_currency is None:
+        if exchange_rate is not None:
+            raise serializers.ValidationError({
+                'exchange_rate': 'No se puede definir una tasa de cambio sin moneda secundaria.'
+            })
+    elif exchange_rate is None or exchange_rate <= 0:
+        raise serializers.ValidationError({
+            'exchange_rate': 'La moneda secundaria requiere una tasa de cambio mayor a 0.'
+        })
+
+
 class BusinessProfileWriteSerializer(serializers.ModelSerializer):
     categories = serializers.PrimaryKeyRelatedField(queryset=BusinessCategory.objects.all(), many=True, required=False)
     city = serializers.PrimaryKeyRelatedField(queryset=City.objects.all(), required=False)
@@ -40,9 +76,15 @@ class BusinessProfileWriteSerializer(serializers.ModelSerializer):
         ]
 
     def validate_business_id(self, value):
-        if value.lower() in RESERVED_BUSINESS_IDS:
-            raise serializers.ValidationError('Este nombre de usuario no está disponible.')
-        return value
+        return validate_business_id_value(value, self.instance)
+
+    def validate(self, attrs):
+        secondary = attrs['secondary_currency'] if 'secondary_currency' in attrs else (
+            self.instance.secondary_currency if self.instance else None)
+        rate = attrs['exchange_rate'] if 'exchange_rate' in attrs else (
+            self.instance.exchange_rate if self.instance else None)
+        validate_exchange_config(secondary, rate)
+        return attrs
 
 
 class BusinessProfileListSerializer(serializers.ModelSerializer):
@@ -442,7 +484,8 @@ class AccountInfoUpdateSerializer(serializers.Serializer):
         choices=BusinessProfile.BUSINESS_TYPE_CHOICES,
         required=False
     )
-    exchange_rate = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    exchange_rate = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True, min_value=Decimal('0.01'))
     is_primary_to_secondary = serializers.BooleanField(required=False)
 
     # City + Currencies as PK related fields (DRF validates existence)
@@ -457,22 +500,22 @@ class AccountInfoUpdateSerializer(serializers.Serializer):
     categories = serializers.PrimaryKeyRelatedField(queryset=BusinessCategory.objects.all(), many=True, required=False)
 
     def validate_business_id(self, value):
-        if value.lower() in RESERVED_BUSINESS_IDS:
-            raise serializers.ValidationError('Este nombre de usuario no está disponible.')
-        if not re.match(r'^[a-z0-9\-_]+$', value):
-            raise serializers.ValidationError(
-                'Solo se permiten letras minúsculas, números, guiones (-) y guiones bajos (_).'
-            )
-        if len(value) < 4 or len(value) > 24:
-            raise serializers.ValidationError(
-                'Debe tener entre 4 y 24 caracteres.'
-            )
-        existing = BusinessProfile.objects.filter(business_id__iexact=value)
-        if self.instance is not None:
-            existing = existing.exclude(pk=self.instance.pk)
-        if existing.exists():
-            raise serializers.ValidationError('Este nombre de usuario ya existe.')
-        return value
+        return validate_business_id_value(value, self.instance)
+
+    def validate(self, attrs):
+        # Cambios parciales: lo no enviado conserva el valor actual del perfil.
+        instance = self.instance
+        if 'secondary_currency' in attrs:
+            secondary = attrs['secondary_currency']
+            if secondary is None and 'exchange_rate' not in attrs:
+                # Apagar la moneda secundaria limpia también la tasa.
+                attrs['exchange_rate'] = None
+        else:
+            secondary = instance.secondary_currency if instance else None
+        rate = attrs['exchange_rate'] if 'exchange_rate' in attrs else (
+            instance.exchange_rate if instance else None)
+        validate_exchange_config(secondary, rate)
+        return attrs
 
     def update(self, instance: BusinessProfile, validated_data):
         """Update BusinessProfile instance and related User fields.
