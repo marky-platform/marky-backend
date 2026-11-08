@@ -93,6 +93,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'marky_backend.request_id.RequestIdMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -226,14 +227,22 @@ DEFAULT_FROM_EMAIL = env.str("DEFAULT_FROM_EMAIL", "")
 
 ANYMAIL = {
     'RESEND_API_KEY': env.str("RESEND_API_KEY", ""),
+    'REQUESTS_TIMEOUT': (5, 15),  # (conexión, lectura) en segundos
 }
 
+# Correo en cola (F-17): los requests solo encolan; un worker/cron debe ejecutar `send_queued_mail`
+# (reintenta los fallidos hasta MAX_RETRIES, cada RETRY_INTERVAL) y `purge_mail` (F-44).
 POST_OFFICE = {
-    'DEFAULT_PRIORITY': 'now',
+    'DEFAULT_PRIORITY': 'medium',
+    'MAX_RETRIES': 3,
+    'RETRY_INTERVAL': timedelta(minutes=5),
     'BACKENDS': {
         'default': 'anymail.backends.resend.EmailBackend',
     },
 }
+
+# Retención de filas de correo ya procesadas (guardan códigos/enlaces): comando `purge_mail`.
+MAIL_RETENTION_HOURS = env.int('MAIL_RETENTION_HOURS', default=24)
 
 FRONTEND_URL = env.str('FRONTEND_URL', 'http://localhost:3000')
 
@@ -273,6 +282,7 @@ CORS_ALLOWED_ORIGIN_REGEXES += env.list("CORS_ALLOWED_ORIGIN_REGEXES", default=[
 
 CORS_EXPOSE_HEADERS = [
     'content-disposition',
+    'x-request-id',
 ]
 
 SIMPLE_JWT = {
@@ -375,10 +385,20 @@ LOGGING_LEVEL = env.str('LOGGING_LEVEL', default='INFO')
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'filters': {
+        'request_id': {'()': 'marky_backend.request_id.RequestIdFilter'},
+    },
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s',
+        },
+    },
     'handlers': {
         'console': {
             'level': LOGGING_LEVEL,
             'class': 'logging.StreamHandler',
+            'filters': ['request_id'],
+            'formatter': 'standard',
         },
     },
     'root': {
@@ -400,6 +420,9 @@ ANALYTICS_INGESTION_ENABLED = env.bool('ANALYTICS_INGESTION_ENABLED', default=Tr
 # Retención de eventos crudos (13 meses); la aplica el comando `purge_analytics_events`.
 ANALYTICS_EVENT_RETENTION_DAYS = env.int('ANALYTICS_EVENT_RETENTION_DAYS', default=395)
 ANALYTICS_MAX_BATCH_SIZE = 20
+# Tope de eventos aceptados por negocio y minuto (F-19): limita el daño de la ingesta anónima
+# forjable. Lo que excede se responde 202 con `rejected` (contrato sin cambios).
+ANALYTICS_BUSINESS_MAX_EVENTS_PER_MINUTE = env.int('ANALYTICS_BUSINESS_MAX_EVENTS_PER_MINUTE', default=600)
 ANALYTICS_MAX_BODY_BYTES = 32 * 1024
 
 CITIES_LIGHT_DATA_DIR = os.path.join(BASE_DIR, 'cities')

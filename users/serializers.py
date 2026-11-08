@@ -1,4 +1,3 @@
-from marky_backend import settings
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
@@ -8,7 +7,7 @@ from django.utils import timezone
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes
 from django.utils.translation import gettext_lazy as _
-from post_office import mail
+from users.mailing import queue_mail, RECOVERY_MAIL_TTL
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.settings import api_settings
@@ -18,6 +17,8 @@ User = get_user_model()
 
 
 class UserRegisterSerializer(serializers.ModelSerializer):
+    # Sin UniqueValidator: un correo ya registrado no debe revelarse (F-21); lo resuelve RegisterView.
+    email = serializers.EmailField()
     business_name = serializers.CharField(max_length=22)
 
     class Meta:
@@ -28,11 +29,6 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         value = value.strip()
         if not value:
             raise serializers.ValidationError("Este campo es requerido.")
-        return value
-
-    def validate_email(self, value):
-        if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("Este correo ya está registrado.")
         return value
 
     def validate(self, attrs):
@@ -108,13 +104,8 @@ class PasswordRecoverySerializer(serializers.Serializer):
         from django.conf import settings as django_settings
         verification_link = f"{django_settings.FRONTEND_URL}/reset-password/{uid}/{token}/"
 
-        mail.send(
-            user.email,
-            settings.DEFAULT_FROM_EMAIL,
-            template='password_recovery',
-            context={'verification_link': verification_link},
-            # priority='now',
-        )
+        queue_mail(user.email, 'password_recovery', {'verification_link': verification_link},
+                   expires_in=RECOVERY_MAIL_TTL)
 
 
 class PasswordChangeSerializer(serializers.Serializer):

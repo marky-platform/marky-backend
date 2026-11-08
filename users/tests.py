@@ -16,7 +16,7 @@ class TestRegister(MarkyAPITestCase):
         super().setUp()
         cache.clear()
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_register_creates_unverified_user(self, mock_mail):
         response = self.client.post('/api/v1/users/register/', {
             'username': 'newuser',
@@ -29,7 +29,7 @@ class TestRegister(MarkyAPITestCase):
         self.assertFalse(user.is_verified)
         self.assertIsNotNone(user.verification_code)
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_register_trims_business_name_whitespace(self, mock_mail):
         response = self.client.post('/api/v1/users/register/', {
             'username': 'trimuser',
@@ -41,7 +41,7 @@ class TestRegister(MarkyAPITestCase):
         user = User.objects.get(email='trimuser@test.com')
         self.assertEqual(user.business_name, 'Dulce Momento')
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_register_adds_user_to_business_group(self, mock_mail):
         self.client.post('/api/v1/users/register/', {
             'username': 'groupuser',
@@ -52,7 +52,7 @@ class TestRegister(MarkyAPITestCase):
         user = User.objects.get(email='groupuser@test.com')
         self.assertTrue(user.groups.filter(name='business').exists())
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_register_sends_verification_email(self, mock_mail):
         self.client.post('/api/v1/users/register/', {
             'username': 'emailuser',
@@ -62,7 +62,7 @@ class TestRegister(MarkyAPITestCase):
         })
         mock_mail.assert_called_once()
 
-    def test_register_duplicate_email_returns_400(self):
+    def test_register_duplicate_email_returns_uniform_201(self):
         User.objects.create_user(
             username='existing', email='existing@test.com', password='TestPass123!',
         )
@@ -72,9 +72,9 @@ class TestRegister(MarkyAPITestCase):
             'password': 'TestPass123!',
             'business_name': 'My Business',
         })
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 201)
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_register_accepts_business_name_at_22_char_boundary(self, mock_mail):
         response = self.client.post('/api/v1/users/register/', {
             'username': 'boundaryuser',
@@ -93,7 +93,7 @@ class TestRegister(MarkyAPITestCase):
         })
         self.assertEqual(response.status_code, 400)
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_register_weak_password_returns_400_with_password_key(self, mock_mail):
         response = self.client.post('/api/v1/users/register/', {
             'email': 'weak@test.com',
@@ -145,7 +145,7 @@ class TestEmailVerification(MarkyAPITestCase):
             cache.clear()
         self.assertNotEqual(self._verify(user, '123456').status_code, 200)
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_resend_resets_attempts_counter(self, mock_mail):
         user = self._make_unverified_user()
         for _ in range(3):
@@ -264,7 +264,7 @@ class TestLogin(MarkyAPITestCase):
 
 class TestResendVerification(MarkyAPITestCase):
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_unverified_user_receives_new_code(self, mock_mail):
         user = User.objects.create_user(
             username='resend_user', email='resend@test.com',
@@ -280,17 +280,17 @@ class TestResendVerification(MarkyAPITestCase):
         self.assertNotEqual(user.verification_code, old_code)
         mock_mail.assert_called_once()
 
-    @patch('users.views.mail.send')
+    @patch('users.mailing.mail.send')
     def test_nonexistent_email_returns_200_without_leaking(self, mock_mail):
         # Security: always return 200 regardless of whether email exists
         response = self.client.post('/api/v1/users/resend-verification/', {'email': 'ghost@test.com'})
         self.assertEqual(response.status_code, 200)
         mock_mail.assert_not_called()
 
-    def test_already_verified_user_returns_400(self):
+    def test_already_verified_user_returns_generic_200(self):
         user, _ = self.make_user('resend_verified', 'resend_verified@test.com')
         response = self.client.post('/api/v1/users/resend-verification/', {'email': user.email})
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 200)
 
 
 class TestTokenRevocation(MarkyAPITestCase):

@@ -146,6 +146,31 @@ EMAIL_TEMPLATES = [
 </body>
 </html>""",
     },
+    {
+        "name": "account_exists",
+        "subject": "[Marky] Ya tienes una cuenta",
+        "content": "Alguien intentó registrar una cuenta con este correo, pero ya tienes una en Marky. "
+                   "Inicia sesión en {{ login_link }}; si olvidaste tu contraseña, usa la opción de recuperación. "
+                   "Si no fuiste tú, puedes ignorar este correo.",
+        "html_content": """<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Ya tienes una cuenta - Marky</title></head>
+<body style="margin: 0; padding: 20px; font-family: Arial, sans-serif; background-color: #f4f4f4;">
+    <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; padding: 30px; text-align: center;">
+        <h1 style="font-size: 24px; margin: 0 0 16px; color: #000;">Ya tienes una cuenta</h1>
+        <p style="font-size: 14px; color: #333;">
+            Alguien intentó registrar una cuenta en Marky con este correo, pero ya tienes una.
+            Puedes iniciar sesión o, si olvidaste tu contraseña, recuperarla desde la pantalla de acceso.
+        </p>
+        <p style="margin: 24px 0;">
+            <a href="{{ login_link }}" style="background-color: #2b63d9; color: #ffffff; padding: 12px 25px; text-decoration: none; font-size: 16px; font-weight: bold; border-radius: 5px; display: inline-block;">Iniciar sesión</a>
+        </p>
+        <p style="font-size: 14px; color: #333;">Si no fuiste tú, puedes ignorar este correo.</p>
+        <p style="font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 16px;">©2025 Marky</p>
+    </div>
+</body>
+</html>""",
+    },
 ]
 
 
