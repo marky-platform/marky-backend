@@ -13,6 +13,9 @@ from datetime import timedelta
 from pathlib import Path
 import environ
 import os
+import re
+
+from marky_backend.prod_checks import validate_production_env
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,6 +34,10 @@ SECRET_KEY = env.str("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env.bool("DEBUG", default=False)
 
+# Con DEBUG=False se exige el entorno completo (falla al arrancar, no degrada a SQLite/FS local).
+if not DEBUG:
+    validate_production_env(os.environ)
+
 SENTRY_DSN = env.str('SENTRY_DSN', default='')
 if SENTRY_DSN:
     import sentry_sdk
@@ -45,7 +52,18 @@ if SENTRY_DSN:
 ALLOWED_HOSTS = env.list("HOST", default=["*"])
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-# SECURE_SSL_REDIRECT = env.bool("SECURE_REDIRECT", default=False)
+
+if not DEBUG:
+    # HTTPS detrás del proxy de Railway. Los healthchecks pueden llegar por http: se eximen del redirect
+    # (la regex se evalúa contra el path sin la barra inicial).
+    SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=True)
+    SECURE_REDIRECT_EXEMPT = [r'^healthz/?$', r'^readyz/?$']
+    # HSTS: max-age corto al inicio (1 hora); subir con SECURE_HSTS_SECONDS cuando HTTPS esté probado.
+    SECURE_HSTS_SECONDS = env.int('SECURE_HSTS_SECONDS', default=3600)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=False)
+    SECURE_HSTS_PRELOAD = env.bool('SECURE_HSTS_PRELOAD', default=False)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 # FIELD_ENCRYPTION_KEY = env.str("FIELD_ENCRYPTION_KEY", default=None)
 
 
@@ -121,6 +139,22 @@ if env.str("DATABASE_URL", default=None):
     DATABASES = {
         # 'default': env.db(engine='django.db.backends.postgresql_psycopg2')
         'default': env.db(engine='django.contrib.gis.db.backends.postgis')
+    }
+    # Reutiliza conexiones entre requests (solo PostGIS; SQLite local se deja con el default).
+    DATABASES['default']['CONN_MAX_AGE'] = env.int('CONN_MAX_AGE', default=60)
+    DATABASES['default']['CONN_HEALTH_CHECKS'] = env.bool('CONN_HEALTH_CHECKS', default=True)
+
+# Cache compartida entre workers (los throttles de DRF guardan sus contadores aquí).
+# Por defecto DatabaseCache: crear la tabla con `python manage.py createcachetable` (idempotente;
+# el preDeployCommand de railway.json ya lo hace). CACHE_URL permite usar Redis, p. ej. rediscache://host:6379/1
+if env.str('CACHE_URL', default=''):
+    CACHES = {'default': env.cache_url('CACHE_URL')}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+            'LOCATION': 'django_cache',
+        }
     }
 
 # Password validation
@@ -213,6 +247,18 @@ POST_OFFICE = {
 
 FRONTEND_URL = env.str('FRONTEND_URL', 'http://localhost:3000')
 
+if not DEBUG:
+    # Orígenes confiables para CSRF (admin de Django sobre HTTPS): dominios propios y el frontend.
+    CSRF_TRUSTED_ORIGINS = (
+        [f'https://{host}' for host in ALLOWED_HOSTS if host and not host.startswith(('*', '.'))]
+        + [FRONTEND_URL.rstrip('/')]
+        + env.list('CSRF_TRUSTED_ORIGINS', default=[])
+    )
+    # El healthcheck de Railway llega con Host: healthcheck.railway.app. Se permite aquí (después de
+    # armar CSRF_TRUSTED_ORIGINS, para que no cuente como origen confiable).
+    if 'healthcheck.railway.app' not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append('healthcheck.railway.app')
+
 CORS_ALLOW_ALL = DEBUG
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOWED_ORIGINS = [
@@ -222,10 +268,18 @@ CORS_ALLOWED_ORIGINS = [
     'http://0.0.0.0:3000',
 ] + env.list("CORS_ALLOWED_ORIGINS", default=[])
 
+# Vercel: producción en marky-admin.vercel.app; los previews llevan el slug del equipo
+# (marky-admin-<hash|git-rama>-<equipo>.vercel.app). Sin VERCEL_TEAM_SLUG no se aceptan previews.
 CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://marky-admin.*\.vercel\.app$",
+    r"^https://marky-admin\.vercel\.app$",
     r"^https://(www\.)?marky\.one$",
-] + env.list("CORS_ALLOWED_ORIGIN_REGEXES", default=[])
+]
+_vercel_team = env.str('VERCEL_TEAM_SLUG', default='')
+if _vercel_team:
+    CORS_ALLOWED_ORIGIN_REGEXES.append(
+        rf"^https://marky-admin-[a-z0-9-]+-{re.escape(_vercel_team)}\.vercel\.app$"
+    )
+CORS_ALLOWED_ORIGIN_REGEXES += env.list("CORS_ALLOWED_ORIGIN_REGEXES", default=[])
 
 CORS_EXPOSE_HEADERS = [
     'content-disposition',
@@ -277,7 +331,6 @@ REST_FRAMEWORK = {
     'NUM_PROXIES': NUM_PROXIES,
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -291,6 +344,8 @@ REST_FRAMEWORK = {
         'verify': '5/minute',
         'recovery': '5/minute',
         'refresh': '30/minute',
+        'password_change': '5/minute',
+        'validate_name': '30/minute',
         'public': '60/minute',
         'analytics': '120/minute',
     },
@@ -310,7 +365,7 @@ SPECTACULAR_SETTINGS = {
         "persistAuthorization": True,
         "displayOperationId": True,
     },
-    # TODO: if DEBUG allowAny, if not IsAuthenticated
+    # El acceso a schema/Swagger/ReDoc se restringe en urls.py (DEBUG o staff con sesión de /admin/).
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     "TITLE": "Marky API",
     "DESCRIPTION": "API documentation for Marky",

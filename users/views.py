@@ -252,6 +252,7 @@ class PasswordRecoveryView(generics.GenericAPIView):
 @extend_schema(tags=['Auth'])
 class PasswordChangeView(generics.GenericAPIView):
     permission_classes = [AllowAny]
+    throttle_scope = 'password_change'
     serializer_class = PasswordChangeSerializer
 
     def post(self, request, *args, **kwargs):

@@ -112,6 +112,7 @@ class CountryListView(generics.ListAPIView):
 
 class ValidateBusinessNameView(APIView):
     permission_classes = [AllowAny]
+    throttle_scope = 'validate_name'
 
     def get(self, request, format=None):
         business_id = request.query_params.get("business_id", None)

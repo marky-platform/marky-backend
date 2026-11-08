@@ -20,6 +20,7 @@ python manage.py test products          # single app
 python manage.py test products.tests.SomeTest.test_method   # single test
 python manage.py cities_light           # download/import city & country data (PY, VE)
 python manage.py send_queued_mail       # flush the post_office email queue
+python manage.py createcachetable       # one-off: creates the `django_cache` table (DatabaseCache; idempotent)
 ```
 
 Note: test files are currently stubs — there is no real test suite yet.
@@ -28,6 +29,8 @@ Note: test files are currently stubs — there is no real test suite yet.
 
 - Config is read from `.env` via `django-environ` (see `.env.example`).
 - **No `DATABASE_URL` set → SQLite** (`db.sqlite3`). When `DATABASE_URL` is set, the engine is forced to **PostGIS** (`django.contrib.gis.db.backends.postgis`), not plain Postgres. GIS features (the `Branch.location` PointField, distance queries) only work against PostGIS — see `README.md` for the `apt-get install binutils gdal-bin libgdal-dev` + `CREATE EXTENSION postgis` setup.
+- **`DEBUG=False` fails fast:** `marky_backend/prod_checks.py::validate_production_env` raises `ImproperlyConfigured` unless `DATABASE_URL`, `HOST` (no `*`), `FRONTEND_URL`, `RESEND_API_KEY` and the R2 vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_STORAGE_BUCKET_NAME`, `AWS_S3_ENDPOINT_URL`) are set. Local `.env` uses `DEBUG=1`, so dev and tests are unaffected. With `DEBUG=False` settings also enable SSL redirect (exempting `/healthz` and `/readyz`), HSTS (`SECURE_HSTS_SECONDS`, default 3600), secure cookies and `CSRF_TRUSTED_ORIGINS`. Optional env: `SECURE_SSL_REDIRECT`, `SECURE_HSTS_*`, `CSRF_TRUSTED_ORIGINS`, `CONN_MAX_AGE` (60), `CONN_HEALTH_CHECKS` (True), `CACHE_URL`, `VERCEL_TEAM_SLUG` (allows Vercel preview origins in CORS). `check --deploy` leaves only W005/W021 (HSTS subdomains/preload), deliberate with a short max-age.
+- **Cache / throttling:** `CACHES['default']` is `DatabaseCache` (table `django_cache`, run `createcachetable` once; the test runner creates it itself) so DRF throttle counters are shared across workers. Set `CACHE_URL` (e.g. `rediscache://...`) to use Redis instead. Client IP for throttles depends on `NUM_PROXIES` (Railway = 1).
 - `marky_backend/local_settings.py` is imported last if present and overrides everything (gitignored, currently empty).
 
 ## Architecture
@@ -46,7 +49,7 @@ Every business-scoped view filters its queryset by the requesting user's profile
 
 ### Auth & permissions
 
-- JWT via `djangorestframework-simplejwt` (`Authorization: Bearer ...`). Both Session and JWT auth are enabled.
+- JWT via `djangorestframework-simplejwt` (`Authorization: Bearer ...`). Only JWT auth is enabled in DRF (no `SessionAuthentication`; Django admin keeps its own session login).
 - Tokens: access 30 min, refresh 30 days with rotation + `token_blacklist`. `POST /users/logout/` blacklists the refresh token (access tokens stay valid until they expire). `CHECK_REVOKE_TOKEN: True` embeds a `hash_password` claim, so a password change (`PasswordChangeView`) also kills previously issued access tokens (401) and blacklists all outstanding refresh tokens; tokens minted via `RefreshToken.for_user` carry the claim automatically.
 - Email verification uses a 6-digit code stored on the user (`User.verification_code`, with `verification_attempts` and a lockout after 5 failed attempts) — see `users/views.py` `RegisterView`/`VerifyEmailView`. Emails are sent through `post_office` (DB-queued; flush with `send_queued_mail`).
 - `utils/permissions.py::IsBusinessOrSuperAdmin` gates business/product endpoints — it checks membership in the Django **group named `business`** (users are auto-added to this group on register) or `is_superuser`.
@@ -64,5 +67,7 @@ Both `ProductCategory` and `Product` carry the same promotion fields (`multibuy_
 DRF is configured globally with `drf_nested_forms` parsers (`NestedMultiPartParser`, `NestedJSONParser`) before the standard `FormParser`. This lets multipart requests carry nested structures (e.g. a product plus its variants/media/addons and their image files in one request). Product write views use `ProductInputSerializer` for create/update and `ProductSerializer` for reads (`get_serializer_class` switches by action). Image uploads are validated by `business/validators.py` (≤2MB, jpg/jpeg/png/gif).
 
 ## API docs
+
+In production (`DEBUG=False`) the schema/Swagger/ReDoc URLs return 404 unless the visitor is a staff user logged in via `/admin/` (see `docs_gate` in `urls.py`). Probes: `/healthz` (process up, no DB) and `/readyz` (`SELECT 1`), both unauthenticated and unthrottled.
 
 Spectacular schema at `/api/schema/`, Swagger UI at `/api/schema/swagger/`, ReDoc at `/api/schema/redoc/`. Tag new endpoints with `@extend_schema(tags=[...])` using the existing tags (`Auth`, `Business`, `Cities`, `Products`).
