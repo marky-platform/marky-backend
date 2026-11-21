@@ -284,6 +284,9 @@ class TestStorageOptions(SimpleTestCase):
         script = ' '.join((base / 'scripts' / 'start.sh').read_text().replace('\\\n', ' ').split())
         for flag in flags:
             self.assertIn(flag, script)
+        self.assertIn('python manage.py release', script)
+        self.assertIn('SKIP_RELEASE', script)
+        self.assertLess(script.index('python manage.py release'), script.index('exec gunicorn'))
 
 
 class TestOrphanFileCleanup(MediaRootMixin, MarkyAPITestCase):

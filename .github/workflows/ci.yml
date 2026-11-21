@@ -77,7 +77,7 @@ jobs:
         run: python manage.py test
 
       - name: Release command is idempotent (twice on PostGIS)
-        # Mismo paso que el pre-deploy de Railway; correrlo dos veces prueba que es seguro en cada deploy.
+        # Mismo paso que corre scripts/start.sh al arrancar; correrlo dos veces prueba que es seguro en cada deploy.
         run: |
           python manage.py release
           python manage.py release

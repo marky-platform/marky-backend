@@ -62,3 +62,59 @@ class ReleaseCommandTests(TestCase):
         with mock.patch('business.management.commands.release.call_command', side_effect=boom):
             with self.assertRaises(CommandError):
                 call_command('release', stdout=StringIO())
+
+
+class StartScriptTests(TestCase):
+    """Ejecuta scripts/start.sh con `python`/`gunicorn` falsos en el PATH."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import pathlib
+        import tempfile
+        cls.script = pathlib.Path(__file__).resolve().parent.parent / 'scripts' / 'start.sh'
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        cls.bin = pathlib.Path(cls.tmp.name)
+        cls.log = cls.bin / 'calls.log'
+
+    def _fake(self, name, body):
+        path = self.bin / name
+        path.write_text('#!/bin/sh\n' + body)
+        path.chmod(0o755)
+
+    def _run(self, release_exit=0, skip=False):
+        import subprocess
+        self.log.write_text('')
+        self._fake('python', f'echo "python $*" >> "{self.log}"\nexit {release_exit}\n')
+        self._fake('gunicorn', f'echo "gunicorn $*" >> "{self.log}"\n')
+        env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'PORT': '8123'}
+        if skip:
+            env['SKIP_RELEASE'] = '1'
+        proc = subprocess.run(['sh', str(self.script)], env=env, capture_output=True, text=True)
+        return proc, self.log.read_text().splitlines()
+
+    def test_syntax(self):
+        import subprocess
+        subprocess.run(['sh', '-n', str(self.script)], check=True)
+
+    def test_release_runs_before_gunicorn(self):
+        proc, calls = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], 'python manage.py release')
+        self.assertTrue(calls[1].startswith('gunicorn marky_backend.wsgi:application'))
+        self.assertIn('--bind 0.0.0.0:8123', calls[1])
+        self.assertIn('[start] release OK', proc.stdout)
+
+    def test_skip_release(self):
+        proc, calls = self._run(skip=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith('gunicorn'))
+        self.assertIn('SKIP_RELEASE=1', proc.stdout)
+
+    def test_failing_release_blocks_gunicorn(self):
+        proc, calls = self._run(release_exit=1)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(calls, ['python manage.py release'])

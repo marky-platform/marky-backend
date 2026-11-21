@@ -2,19 +2,19 @@
 
 All deploy logic lives in this repo (`Dockerfile`, `scripts/start.sh`, `python manage.py release`).
 `railway.json` was removed: Railway "Config as Code" is deprecated and was never applied to our services.
-The dashboard holds only the two settings below plus environment variables.
+The container itself runs `python manage.py release` on start, so the dashboard needs no pre-deploy command, no start command and no config file path: only the settings below plus environment variables.
 
 ## 1. Dashboard settings (identical in dev, QA and prod)
 
 | Setting | Value |
 |---|---|
 | Builder | Dockerfile |
-| Pre-deploy command | `python manage.py release` |
 | Healthcheck path | `/healthz` |
-| Start command | **empty** (the Dockerfile `CMD` runs `scripts/start.sh`) |
-| Config file path | empty |
+| Pre-deploy / start command / config file path | **leave empty** (the Dockerfile `CMD` runs `scripts/start.sh`, which runs `release` and then gunicorn) |
 
-`release` runs `migrate --noinput`, `createcachetable` and `seed`, in that order. It is idempotent and fails the deploy (non-zero exit) if any step fails.
+`scripts/start.sh` runs `python manage.py release` before gunicorn: `migrate --noinput`, `createcachetable` and `seed`, in that order. It is idempotent; if any step fails the container exits non-zero (the `[release] <step> FALLÓ` line is in the logs) and never serves traffic. Independently, migration `users.0006_create_cache_table` creates the `django_cache` table whenever `CACHES` uses `DatabaseCache`, so any `migrate` guarantees it.
+
+**Multiple replicas:** every replica would run `release` at start, and concurrent migrations can race. In that case set `SKIP_RELEASE=1` on the service and configure `python manage.py release` as the platform pre-deploy command instead (the same applies if you simply prefer a pre-deploy step).
 
 ## 2. Environment variables
 
@@ -42,9 +42,9 @@ Vercel side: `REACT_APP_API_URL` must point to the matching backend (`https://<H
 1. Create or duplicate the Railway environment.
 2. Add a PostGIS database service from the `postgis/postgis` template (not the stock Postgres plugin).
 3. Set the env vars from section 2 (`DATABASE_URL` from the new database).
-4. Set the dashboard settings from section 1 (Dockerfile builder, pre-deploy command, healthcheck, no start command).
+4. Set the dashboard settings from section 1 (Dockerfile builder, healthcheck path; nothing else).
 5. Point the service at the environment's branch.
-6. Deploy. The pre-deploy `release` step creates the schema, the cache table and the seed data.
+6. Deploy. The start-time `release` step creates the schema, the cache table and the seed data.
 7. Check `https://<HOST>/healthz` returns 200.
 8. Run once: `python manage.py cities_light`.
 9. Schedule cron jobs: `flushexpiredtokens`, `send_queued_mail` (nothing is emailed until it runs), `purge_mail`, `purge_analytics_events`, `expire_promotions` (every 5 minutes).
@@ -58,7 +58,7 @@ Redeploy the previous deployment from the Railway dashboard. Migrations are not 
 
 | Symptom | Cause / fix |
 |---|---|
-| `relation "django_cache" does not exist` | The pre-deploy command is not running. Check the dashboard has `python manage.py release`; as a stopgap run `python manage.py createcachetable` |
-| `column ... does not exist` / `relation ... does not exist` | Same: migrations did not run. Fix the pre-deploy command, redeploy |
-| Deploy fails at pre-deploy | Read the `[release] <step> FALLÓ` line in the deploy logs |
+| `relation "django_cache" does not exist` | Should not happen: `release` runs at container start and migration `users.0006` creates the table. Check the logs for `[start] SKIP_RELEASE=1` (then run `python manage.py release` as pre-deploy) or a `[release] <step> FALLÓ` line; as a stopgap run `python manage.py createcachetable` |
+| `column ... does not exist` / `relation ... does not exist` | Same: migrations did not run. Check for `SKIP_RELEASE=1` or a failed `[release]` step in the logs, redeploy |
+| Container exits right after start | Read the `[release] <step> FALLÓ` line in the logs (usually DB unreachable or a bad migration) |
 | App exits at boot with `ImproperlyConfigured` | A required env var from section 2 is missing |
