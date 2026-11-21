@@ -76,6 +76,12 @@ jobs:
       - name: Tests
         run: python manage.py test
 
+      - name: Release command is idempotent (twice on PostGIS)
+        # Mismo paso que corre scripts/start.sh al arrancar; correrlo dos veces prueba que es seguro en cada deploy.
+        run: |
+          python manage.py release
+          python manage.py release
+
       - name: Dependency audit (pip-audit)
         # Audits the pinned requirements.txt only (no resolution, no install).
         # Known open advisories are tracked in DEFERRED-PLATFORM-TASKS (Pillow 13,
