@@ -41,6 +41,7 @@ jobs:
       SECRET_KEY: ci-only-not-a-secret
       HOST: localhost
       FRONTEND_URL: http://localhost:3000
+      DEFAULT_FROM_EMAIL: no-reply@ci.local
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/marky
 
     steps:

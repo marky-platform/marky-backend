@@ -22,6 +22,7 @@ PROD_ENV = {
     'HOST': 'api.marky.one',
     'FRONTEND_URL': 'https://app.marky.one',
     'RESEND_API_KEY': 're_test_key',
+    'DEFAULT_FROM_EMAIL': 'no-reply@marky.one',
     'AWS_ACCESS_KEY_ID': 'key',
     'AWS_SECRET_ACCESS_KEY': 'secret',
     'AWS_STORAGE_BUCKET_NAME': 'bucket',
@@ -72,8 +73,8 @@ class TestValidateProductionEnv(SimpleTestCase):
         validate_production_env(PROD_ENV)
 
     def test_each_required_variable_is_enforced(self):
-        required = ['DATABASE_URL', 'HOST', 'FRONTEND_URL', 'RESEND_API_KEY', 'AWS_ACCESS_KEY_ID',
-                    'AWS_SECRET_ACCESS_KEY', 'AWS_STORAGE_BUCKET_NAME', 'AWS_S3_ENDPOINT_URL']
+        required = ['DATABASE_URL', 'HOST', 'FRONTEND_URL', 'RESEND_API_KEY', 'DEFAULT_FROM_EMAIL',
+                    'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_STORAGE_BUCKET_NAME', 'AWS_S3_ENDPOINT_URL']
         for name in required:
             with self.subTest(name=name):
                 incomplete = {k: v for k, v in PROD_ENV.items() if k != name}

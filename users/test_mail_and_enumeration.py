@@ -27,6 +27,8 @@ def _register_payload(email='new@test.com'):
     return {'email': email, 'password': 'TestPass123!', 'business_name': 'Mi Negocio'}
 
 
+# Hermético: el remitente no debe depender del .env (en CI no existe).
+@override_settings(DEFAULT_FROM_EMAIL='no-reply@test.local')
 class MailTestBase(MarkyAPITestCase):
     @classmethod
     def setUpTestData(cls):

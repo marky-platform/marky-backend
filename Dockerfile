@@ -30,7 +30,7 @@ USER app
 RUN SECRET_KEY=build-time-placeholder \
     DATABASE_URL=postgis://build:build@localhost:5432/build \
     HOST=localhost FRONTEND_URL=http://localhost \
-    RESEND_API_KEY=build AWS_ACCESS_KEY_ID=build AWS_SECRET_ACCESS_KEY=build \
+    RESEND_API_KEY=build DEFAULT_FROM_EMAIL=build@localhost AWS_ACCESS_KEY_ID=build AWS_SECRET_ACCESS_KEY=build \
     AWS_STORAGE_BUCKET_NAME=build AWS_S3_ENDPOINT_URL=http://localhost \
     python manage.py collectstatic --noinput
 

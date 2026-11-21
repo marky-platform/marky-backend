@@ -8,6 +8,8 @@ REQUIRED_PRODUCTION_ENV = (
     'HOST',
     'FRONTEND_URL',
     'RESEND_API_KEY',
+    # Remitente de todos los correos; debe ser un remitente verificado en Resend
+    'DEFAULT_FROM_EMAIL',
     # Cloudflare R2 (API compatible con S3)
     'AWS_ACCESS_KEY_ID',
     'AWS_SECRET_ACCESS_KEY',
