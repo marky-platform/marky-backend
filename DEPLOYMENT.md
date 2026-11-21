@@ -47,7 +47,7 @@ Vercel side: `REACT_APP_API_URL` must point to the matching backend (`https://<H
 6. Deploy. The start-time `release` step creates the schema, the cache table and the seed data.
 7. Check `https://<HOST>/healthz` returns 200.
 8. Run once: `python manage.py cities_light`.
-9. Schedule cron jobs: `flushexpiredtokens`, `send_queued_mail` (nothing is emailed until it runs), `purge_mail`, `purge_analytics_events`, `expire_promotions` (every 5 minutes).
+9. Schedule cron jobs: `flushexpiredtokens`, `send_queued_mail` (optional for now: mail is sent inline after commit; this only retries failed sends), `purge_mail`, `purge_analytics_events`, `expire_promotions` (every 5 minutes).
 10. After the first deploy, run once: `python manage.py generate_thumbnails`.
 
 ## 4. Rollback
