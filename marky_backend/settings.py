@@ -147,7 +147,7 @@ if env.str("DATABASE_URL", default=None):
 
 # Cache compartida entre workers (los throttles de DRF guardan sus contadores aquí).
 # Por defecto DatabaseCache: crear la tabla con `python manage.py createcachetable` (idempotente;
-# el preDeployCommand de railway.json ya lo hace). CACHE_URL permite usar Redis, p. ej. rediscache://host:6379/1
+# el comando `release`, pre-deploy en Railway, ya lo hace). CACHE_URL permite usar Redis, p. ej. rediscache://host:6379/1
 if env.str('CACHE_URL', default=''):
     CACHES = {'default': env.cache_url('CACHE_URL')}
 else:

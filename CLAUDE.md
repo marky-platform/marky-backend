@@ -21,17 +21,22 @@ python manage.py test products.tests.SomeTest.test_method   # single test
 python manage.py cities_light           # download/import city & country data (PY, VE)
 python manage.py send_queued_mail       # flush the post_office email queue
 ruff check .                            # lint (ruff.toml: pyflakes F + E9 only; CI runs it)
-python manage.py createcachetable       # one-off: creates the `django_cache` table (DatabaseCache; idempotent)
+python manage.py createcachetable       # creates the `django_cache` table (DatabaseCache; idempotent)
+python manage.py release                # deploy step: migrate + createcachetable + seed (idempotent; Railway pre-deploy command)
 ```
 
 Note: test files are currently stubs — there is no real test suite yet.
+
+## Deployment
+
+All deploy logic lives in the repo: the `Dockerfile` (builder; CMD runs `scripts/start.sh`, the single source of gunicorn flags) and `python manage.py release` (idempotent: migrate + createcachetable + seed). `railway.json` was removed (Railway Config as Code is deprecated and not used). The Railway dashboard holds only: Pre-deploy command `python manage.py release`, Healthcheck path `/healthz`, no custom start command, plus env vars. See `DEPLOYMENT.md`.
 
 ## Environment & database
 
 - Config is read from `.env` via `django-environ` (see `.env.example`).
 - **No `DATABASE_URL` set → SQLite** (`db.sqlite3`). When `DATABASE_URL` is set, the engine is forced to **PostGIS** (`django.contrib.gis.db.backends.postgis`), not plain Postgres. GIS features (the `Branch.location` PointField, distance queries) only work against PostGIS — see `README.md` for the `apt-get install binutils gdal-bin libgdal-dev` + `CREATE EXTENSION postgis` setup.
-- **`DEBUG=False` fails fast:** `marky_backend/prod_checks.py::validate_production_env` raises `ImproperlyConfigured` unless `DATABASE_URL`, `HOST` (no `*`), `FRONTEND_URL`, `RESEND_API_KEY` and the R2 vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_STORAGE_BUCKET_NAME`, `AWS_S3_ENDPOINT_URL`) are set. Local `.env` uses `DEBUG=1`, so dev and tests are unaffected. With `DEBUG=False` settings also enable SSL redirect (exempting `/healthz` and `/readyz`), HSTS (`SECURE_HSTS_SECONDS`, default 3600), secure cookies and `CSRF_TRUSTED_ORIGINS`. Optional env: `SECURE_SSL_REDIRECT`, `SECURE_HSTS_*`, `CSRF_TRUSTED_ORIGINS`, `CONN_MAX_AGE` (60), `CONN_HEALTH_CHECKS` (True), `CACHE_URL`, `VERCEL_TEAM_SLUG` (allows Vercel preview origins in CORS). `check --deploy` leaves only W005/W021 (HSTS subdomains/preload), deliberate with a short max-age.
-- **Cache / throttling:** `CACHES['default']` is `DatabaseCache` (table `django_cache`, run `createcachetable` once; the test runner creates it itself) so DRF throttle counters are shared across workers. Set `CACHE_URL` (e.g. `rediscache://...`) to use Redis instead. Client IP for throttles depends on `NUM_PROXIES` (Railway = 1).
+- **`DEBUG=False` fails fast:** `marky_backend/prod_checks.py::validate_production_env` raises `ImproperlyConfigured` unless `DATABASE_URL`, `HOST` (no `*`), `FRONTEND_URL`, `RESEND_API_KEY`, `DEFAULT_FROM_EMAIL` (must be a Resend-verified sender) and the R2 vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_STORAGE_BUCKET_NAME`, `AWS_S3_ENDPOINT_URL`) are set. Local `.env` uses `DEBUG=1`, so dev and tests are unaffected. With `DEBUG=False` settings also enable SSL redirect (exempting `/healthz` and `/readyz`), HSTS (`SECURE_HSTS_SECONDS`, default 3600), secure cookies and `CSRF_TRUSTED_ORIGINS`. Optional env: `SECURE_SSL_REDIRECT`, `SECURE_HSTS_*`, `CSRF_TRUSTED_ORIGINS`, `CONN_MAX_AGE` (60), `CONN_HEALTH_CHECKS` (True), `CACHE_URL`, `VERCEL_TEAM_SLUG` (allows Vercel preview origins in CORS). `check --deploy` leaves only W005/W021 (HSTS subdomains/preload), deliberate with a short max-age.
+- **Cache / throttling:** `CACHES['default']` is `DatabaseCache` (table `django_cache`, created by `release`; the test runner creates it itself) so DRF throttle counters are shared across workers. Set `CACHE_URL` (e.g. `rediscache://...`) to use Redis instead. Client IP for throttles depends on `NUM_PROXIES` (Railway = 1).
 - `marky_backend/local_settings.py` is imported last if present and overrides everything (gitignored, currently empty).
 
 ## Architecture

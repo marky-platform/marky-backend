@@ -275,18 +275,15 @@ class TestStorageOptions(SimpleTestCase):
         self.assertEqual(o['object_parameters']['CacheControl'], 'public, max-age=31536000')
 
     def test_gunicorn_flags_consistent(self):
-        import json
         import pathlib
         base = pathlib.Path(__file__).resolve().parent.parent
         flags = ['--worker-class gthread', '--threads 4', '--timeout 120',
                  '--max-requests 1000', '--max-requests-jitter 100']
-        # The Dockerfile CMD spans lines with trailing backslash continuations.
-        text = (base / 'Dockerfile').read_text().replace('\\\n', '\n')
-        docker = ' '.join(json.loads(text[text.index('CMD ') + 4:]))
-        railway = json.loads((base / 'railway.json').read_text())['deploy']['startCommand']
+        # El Dockerfile delega en scripts/start.sh (fuente única de los flags de gunicorn).
+        self.assertIn('scripts/start.sh', (base / 'Dockerfile').read_text())
+        script = ' '.join((base / 'scripts' / 'start.sh').read_text().replace('\\\n', ' ').split())
         for flag in flags:
-            self.assertIn(flag, docker)
-            self.assertIn(flag, railway)
+            self.assertIn(flag, script)
 
 
 class TestOrphanFileCleanup(MediaRootMixin, MarkyAPITestCase):
