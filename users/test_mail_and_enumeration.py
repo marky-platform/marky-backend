@@ -250,3 +250,34 @@ class LoginUniformityTests(MailTestBase):
         response = self._login('unv@test.com', 'TestPass123!')
         self.assertEqual(response.status_code, 401)
         self.assertNotEqual(str(response.json()), str(self._login('ghost@test.com', 'x').json()))
+
+
+class ImmediateDeliveryTests(MailTestBase):
+    """Tras el commit el correo se envía en línea; si falla, el request sigue bien y la fila queda."""
+
+    def test_register_dispatches_after_commit(self):
+        with patch('post_office.models.Email.dispatch') as dispatch:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(REGISTER_URL, _register_payload())
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(dispatch.call_count, 1)
+
+    def test_nothing_is_sent_before_commit(self):
+        with patch('post_office.models.Email.dispatch') as dispatch:
+            self.client.post(REGISTER_URL, _register_payload())
+        dispatch.assert_not_called()
+
+    def test_send_failure_does_not_break_register_and_keeps_row(self):
+        with patch('post_office.models.Email.dispatch', side_effect=RuntimeError('resend down')):
+            with self.assertLogs('users.mailing', level='ERROR'):
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self.client.post(REGISTER_URL, _register_payload())
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Email.objects.get().status, STATUS.queued)
+
+    def test_password_recovery_dispatches_after_commit(self):
+        User.objects.create_user(email='rec@test.com', username='rec@test.com', password='TestPass123!', is_verified=True)
+        with patch('post_office.models.Email.dispatch') as dispatch:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.client.post(RECOVERY_URL, {'email': 'rec@test.com'})
+        self.assertEqual(dispatch.call_count, 1)

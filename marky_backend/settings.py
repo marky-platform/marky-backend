@@ -230,8 +230,8 @@ ANYMAIL = {
     'REQUESTS_TIMEOUT': (5, 15),  # (conexión, lectura) en segundos
 }
 
-# Correo en cola (F-17): los requests solo encolan; un worker/cron debe ejecutar `send_queued_mail`
-# (reintenta los fallidos hasta MAX_RETRIES, cada RETRY_INTERVAL) y `purge_mail` (F-44).
+# Correo (F-17): `queue_mail` registra la fila y la envía en línea tras el commit. Si falla, un worker/cron
+# con `send_queued_mail` la reintenta (hasta MAX_RETRIES, cada RETRY_INTERVAL); `purge_mail` limpia (F-44).
 POST_OFFICE = {
     'DEFAULT_PRIORITY': 'medium',
     'MAX_RETRIES': 3,
