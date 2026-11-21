@@ -2,6 +2,7 @@ from decimal import Decimal
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 from business.models import BusinessProfile
+from utils.thumbnails import make_thumbnail
 from .slugs import (
     CATEGORY_FALLBACK_PREFIX,
     PRODUCT_FALLBACK_PREFIX,
@@ -55,7 +56,7 @@ class ProductCategory(SlugAllocationMixin, models.Model):
     class Meta:
         verbose_name = "Product Category"
         verbose_name_plural = "Product Categories"
-        ordering = ['order']
+        ordering = ['order', 'id']
         constraints = [
             models.UniqueConstraint(
                 fields=['business', 'slug'],
@@ -203,12 +204,47 @@ class Product(SlugAllocationMixin, models.Model):
         return primary_amount, secondary_amount, bp.primary_currency, sec_currency
 
 
+def refresh_thumbnail(instance, source_field, thumb_field='thumbnail', is_image=True):
+    """Regenera la miniatura si `source_field` es una subida nueva (F-24).
+
+    Sin archivo nuevo no hace nada, salvo limpiar la miniatura cuando el origen
+    quedó vacío o ya no es una imagen. Si la miniatura falla queda vacía (nunca
+    una miniatura vieja de otra imagen); el archivo anterior lo borra la limpieza F-18.
+    """
+    source = getattr(instance, source_field)
+    if not source or not is_image:
+        # Origen vacío o no imagen: no debe quedar una miniatura obsoleta.
+        if getattr(instance, thumb_field):
+            setattr(instance, thumb_field, None)
+        return
+    if getattr(source, '_committed', True):
+        return
+    thumb = make_thumbnail(source.file)
+    if thumb is not None:
+        getattr(instance, thumb_field).save(thumb.name, thumb, save=False)
+    else:
+        setattr(instance, thumb_field, None)
+
+
+def _with_thumbnail_field(kwargs, source_field):
+    """Si `update_fields` incluye el origen, incluye también 'thumbnail' para persistirla."""
+    update_fields = kwargs.get('update_fields')
+    if update_fields is not None and source_field in update_fields and 'thumbnail' not in update_fields:
+        kwargs['update_fields'] = [*update_fields, 'thumbnail']
+    return kwargs
+
+
 class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
     name = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
     description = models.TextField(blank=True, null=True)
     image = models.ImageField(upload_to='product_variants/', blank=True, null=True)
+    thumbnail = models.FileField(upload_to='product_thumbnails/', blank=True, null=True, editable=False)
+
+    def save(self, *args, **kwargs):
+        refresh_thumbnail(self, 'image')
+        super().save(*args, **_with_thumbnail_field(kwargs, 'image'))
 
     def get_primary_secondary_amounts(self, business_profile=None):
         """Return (primary_amount, secondary_amount, primary_currency, secondary_currency)
@@ -302,8 +338,13 @@ class ProductMedia(models.Model):
 
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='media')
     file = models.FileField(upload_to='product_media/')
+    thumbnail = models.FileField(upload_to='product_thumbnails/', blank=True, null=True, editable=False)
     media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES, default=IMAGE)
     order = models.IntegerField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        refresh_thumbnail(self, 'file', is_image=self.media_type == self.IMAGE)
+        super().save(*args, **_with_thumbnail_field(kwargs, 'file'))
 
     def __str__(self):
         return f'{self.product.name} - {self.media_type}'

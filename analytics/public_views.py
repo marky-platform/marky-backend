@@ -1,4 +1,7 @@
+import time
+
 from django.conf import settings
+from django.core.cache import cache
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -10,6 +13,22 @@ from business.public_views import get_business_or_404
 from .parsers import LimitedJSONParser, PlainTextJSONParser
 from .serializers import AnalyticsEventInputSerializer, PublicEventBatchSerializer
 from .services import ingest_events, is_bot_user_agent
+
+
+def _within_business_cap(business, count):
+    """Ventana fija de 1 minuto por negocio (contador en cache, compartido entre workers).
+
+    Cuenta los eventos recibidos (también los que excedan el tope), así un atacante no gana
+    margen reintentando. Un lote que excede el tope se descarta completo.
+    """
+    key = f'analytics:cap:{business.pk}:{int(time.time() // 60)}'
+    cache.add(key, 0, timeout=120)
+    try:
+        total = cache.incr(key, count)
+    except ValueError:  # la clave expiró entre add e incr
+        cache.set(key, count, timeout=120)
+        total = count
+    return total <= settings.ANALYTICS_BUSINESS_MAX_EVENTS_PER_MINUTE
 
 
 @extend_schema(
@@ -44,6 +63,10 @@ class PublicAnalyticsEventsView(APIView):
 
         # Interruptor global y bots: respuesta 202 sin guardar (el cliente no debe reintentar).
         if not settings.ANALYTICS_INGESTION_ENABLED or is_bot_user_agent(request.META.get('HTTP_USER_AGENT', '')):
+            return Response({'accepted': 0, 'duplicates': 0, 'rejected': len(events)},
+                            status=status.HTTP_202_ACCEPTED)
+
+        if not _within_business_cap(business, len(events)):
             return Response({'accepted': 0, 'duplicates': 0, 'rejected': len(events)},
                             status=status.HTTP_202_ACCEPTED)
 

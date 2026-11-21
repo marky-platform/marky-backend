@@ -1,24 +1,21 @@
-import logging
-
+from django.conf import settings
 from django.db import transaction, models
-from django_filters import rest_framework as filters
 
-logger = logging.getLogger(__name__)
 from drf_spectacular.utils import extend_schema, OpenApiParameter, extend_schema_view
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-import json
-from rest_framework.parsers import MultiPartParser, FormParser
-from drf_nested_forms.parsers import NestedMultiPartParser
+from rest_framework.parsers import FormParser
+from utils.parsers import TextPreservingNestedMultiPartParser
 from rest_framework.response import Response
 from rest_framework import serializers
 from utils.permissions import IsBusinessOrSuperAdmin
-from .filters import ProductCategoryFilter, product_has_active_promotion_q
-from .models import ProductCategory, ProductVariant, ProductAddon
+from business.models import BusinessProfile
+from .models import ProductCategory
 from .models import Product, next_product_order
 from .services import handle_expired_promotions_for_business
 from .catalog import build_catalog_payload
+from .pagination import AllResultsPagination
 from .serializers import (
     ProductCategoryBasicSerializer,
     ProductCategoryWithProductsSerializer,
@@ -51,6 +48,8 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsBusinessOrSuperAdmin]
     serializer_class = ProductCategoryBasicSerializer
     queryset = ProductCategory.objects.all()
+    # F-28: las categorías nunca se truncan por PAGE_SIZE (el tope por negocio las acota).
+    pagination_class = AllResultsPagination
 
     def get_base_queryset(self):
         user = self.request.user
@@ -85,8 +84,19 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         business = self.request.user.business_profile
-        max_order = ProductCategory.objects.filter(business=business).aggregate(models.Max('order'))['order__max'] or 0
-        serializer.save(business=business, order=max_order + 1)
+        limit = settings.MAX_CATEGORIES_PER_BUSINESS
+        # Chequeo del tope + cálculo de order + creación en una sola transacción,
+        # serializada por negocio bloqueando su fila de BusinessProfile; así dos
+        # creaciones concurrentes no pueden pasar ambas el chequeo (SQLite ignora el lock).
+        with transaction.atomic():
+            BusinessProfile.objects.select_for_update().get(pk=business.pk)
+            if ProductCategory.objects.filter(business=business).count() >= limit:
+                raise serializers.ValidationError({
+                    'error': f'Alcanzaste el máximo de {limit} categorías por negocio. '
+                             'Elimina alguna para crear una nueva.'
+                })
+            max_order = ProductCategory.objects.filter(business=business).aggregate(models.Max('order'))['order__max'] or 0
+            serializer.save(business=business, order=max_order + 1)
 
     @extend_schema(
         request=ProductCategoryOrderUpdateSerializer,
@@ -94,17 +104,30 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['post'])
     def update_order(self, request):
-        # TODO: let's see if we can optimize this w/bulk update
-        categories_data = request.data.get('categories', [])
+        serializer = ProductCategoryOrderUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        categories_data = serializer.validated_data['categories']
+        category_ids = [category_data['id'] for category_data in categories_data]
 
-        try:
-            with transaction.atomic():
-                for category_data in categories_data:
-                    ProductCategory.objects.filter(id=category_data['id']).update(order=category_data['order'])
-        except Exception:
-            logger.exception("Error updating category order for user %s", request.user.id)
-            return Response({'error': 'Ha ocurrido un error inesperado.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(category_ids) != len(set(category_ids)):
+            return Response(
+                {'error': 'La lista de categorías no puede contener IDs duplicados.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
+        categories = list(self.get_queryset().filter(id__in=category_ids))
+        if len(categories) != len(category_ids):
+            return Response(
+                {'error': 'Una o más categorías no pertenecen a este negocio.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        orders_by_id = {category_data['id']: category_data['order'] for category_data in categories_data}
+        for category in categories:
+            category.order = orders_by_id[category.id]
+
+        with transaction.atomic():
+            ProductCategory.objects.bulk_update(categories, ['order'])
         return Response({'status': 'Order updated successfully'}, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -147,8 +170,9 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
         category = self.get_object()
         serializer = self.get_serializer(category, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
+            category = serializer.save()
+            # F-39: respuesta con la categoría completa (id/name/icon que lee el modal).
+            return Response(ProductCategoryBasicSerializer(category, context=self.get_serializer_context()).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @extend_schema(
@@ -157,7 +181,10 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['get'], serializer_class=ProductCategoryWithProductsSerializer)
     def with_products(self, request):
-        business = self.request.user.business_profile
+        business = getattr(self.request.user, 'business_profile', None)
+        if business is None:
+            # Usuario sin perfil: catálogo vacío en lugar de un 500.
+            return Response({'products_count': 0, 'results': []})
         handle_expired_promotions_for_business(business)
         payload = build_catalog_payload(
             business=business,
@@ -173,7 +200,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 class ProductViewSet(viewsets.ModelViewSet):
     permission_classes = [IsBusinessOrSuperAdmin]
     queryset = Product.objects.all()
-    parser_classes = (NestedMultiPartParser, FormParser)
+    parser_classes = (TextPreservingNestedMultiPartParser, FormParser)
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -184,17 +211,32 @@ class ProductViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.is_authenticated and hasattr(user, 'business_profile'):
             handle_expired_promotions_for_business(user.business_profile)
-            return Product.objects.filter(business=user.business_profile).select_related('model_3d')
+            # F-22: sin estos prefetch el listado cuesta ~4 consultas por producto.
+            return (
+                Product.objects.filter(business=user.business_profile)
+                .select_related('category', 'model_3d')
+                .prefetch_related('variants', 'addons', 'media')
+                .order_by('id')  # orden estable para la paginación
+            )
         return Product.objects.none()
 
     def perform_create(self, serializer):
         category = serializer.validated_data.get('category')
-        extra = {'order': next_product_order(category)} if category is not None else {}
-        serializer.save(business=self.request.user.business_profile, **extra)
+        # F-37: el cálculo de `order` y el guardado van en una transacción serializada por
+        # categoría (SQLite ignora el lock); así dos altas concurrentes no reciben el mismo orden.
+        with transaction.atomic():
+            if category is not None:
+                ProductCategory.objects.select_for_update().get(pk=category.pk)
+            extra = {'order': next_product_order(category)} if category is not None else {}
+            serializer.save(business=self.request.user.business_profile, **extra)
 
     def perform_update(self, serializer):
         new_category = serializer.validated_data.get('category', serializer.instance.category)
         if new_category is not None and new_category != serializer.instance.category:
-            serializer.save(order=next_product_order(new_category))
+            # Mismo lock por categoría que `perform_create`: dos movidas/altas concurrentes
+            # a la misma categoría no deben recibir el mismo `order` (SQLite ignora el lock).
+            with transaction.atomic():
+                ProductCategory.objects.select_for_update().get(pk=new_category.pk)
+                serializer.save(order=next_product_order(new_category))
         else:
             serializer.save()

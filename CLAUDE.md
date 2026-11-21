@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Stack
 
-Django 5.1 + Django REST Framework backend for "Marky", a multi-tenant platform where each business (commercial or entrepreneur) manages a profile, branches, products, and promotions. Primary language of the domain/UI strings is Spanish; `LANGUAGE_CODE = 'es'`, timezone `America/Asuncion`.
+Django 5.2 LTS + Django REST Framework backend for "Marky", a multi-tenant platform where each business (commercial or entrepreneur) manages a profile, branches, products, and promotions. Primary language of the domain/UI strings is Spanish; `LANGUAGE_CODE = 'es'`, timezone `America/Asuncion`.
 
 ## Commands
 
@@ -20,6 +20,8 @@ python manage.py test products          # single app
 python manage.py test products.tests.SomeTest.test_method   # single test
 python manage.py cities_light           # download/import city & country data (PY, VE)
 python manage.py send_queued_mail       # flush the post_office email queue
+ruff check .                            # lint (ruff.toml: pyflakes F + E9 only; CI runs it)
+python manage.py createcachetable       # one-off: creates the `django_cache` table (DatabaseCache; idempotent)
 ```
 
 Note: test files are currently stubs — there is no real test suite yet.
@@ -28,6 +30,8 @@ Note: test files are currently stubs — there is no real test suite yet.
 
 - Config is read from `.env` via `django-environ` (see `.env.example`).
 - **No `DATABASE_URL` set → SQLite** (`db.sqlite3`). When `DATABASE_URL` is set, the engine is forced to **PostGIS** (`django.contrib.gis.db.backends.postgis`), not plain Postgres. GIS features (the `Branch.location` PointField, distance queries) only work against PostGIS — see `README.md` for the `apt-get install binutils gdal-bin libgdal-dev` + `CREATE EXTENSION postgis` setup.
+- **`DEBUG=False` fails fast:** `marky_backend/prod_checks.py::validate_production_env` raises `ImproperlyConfigured` unless `DATABASE_URL`, `HOST` (no `*`), `FRONTEND_URL`, `RESEND_API_KEY` and the R2 vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_STORAGE_BUCKET_NAME`, `AWS_S3_ENDPOINT_URL`) are set. Local `.env` uses `DEBUG=1`, so dev and tests are unaffected. With `DEBUG=False` settings also enable SSL redirect (exempting `/healthz` and `/readyz`), HSTS (`SECURE_HSTS_SECONDS`, default 3600), secure cookies and `CSRF_TRUSTED_ORIGINS`. Optional env: `SECURE_SSL_REDIRECT`, `SECURE_HSTS_*`, `CSRF_TRUSTED_ORIGINS`, `CONN_MAX_AGE` (60), `CONN_HEALTH_CHECKS` (True), `CACHE_URL`, `VERCEL_TEAM_SLUG` (allows Vercel preview origins in CORS). `check --deploy` leaves only W005/W021 (HSTS subdomains/preload), deliberate with a short max-age.
+- **Cache / throttling:** `CACHES['default']` is `DatabaseCache` (table `django_cache`, run `createcachetable` once; the test runner creates it itself) so DRF throttle counters are shared across workers. Set `CACHE_URL` (e.g. `rediscache://...`) to use Redis instead. Client IP for throttles depends on `NUM_PROXIES` (Railway = 1).
 - `marky_backend/local_settings.py` is imported last if present and overrides everything (gitignored, currently empty).
 
 ## Architecture
@@ -46,8 +50,9 @@ Every business-scoped view filters its queryset by the requesting user's profile
 
 ### Auth & permissions
 
-- JWT via `djangorestframework-simplejwt` (`Authorization: Bearer ...`). Both Session and JWT auth are enabled.
-- Email verification uses a 6-digit code **embedded as a claim inside a short-lived JWT** (not stored in the DB) — see `users/views.py` `RegisterView`/`VerifyEmailView`. Emails are sent through `post_office` (DB-queued; flush with `send_queued_mail`).
+- JWT via `djangorestframework-simplejwt` (`Authorization: Bearer ...`). Only JWT auth is enabled in DRF (no `SessionAuthentication`; Django admin keeps its own session login).
+- Tokens: access 30 min, refresh 30 days with rotation + `token_blacklist`. `POST /users/logout/` blacklists the refresh token (access tokens stay valid until they expire). `CHECK_REVOKE_TOKEN: True` embeds a `hash_password` claim, so a password change (`PasswordChangeView`) also kills previously issued access tokens (401) and blacklists all outstanding refresh tokens; tokens minted via `RefreshToken.for_user` carry the claim automatically.
+- Email verification uses a 6-digit code stored on the user (`User.verification_code`, with `verification_attempts` and a lockout after 5 failed attempts) — see `users/views.py` `RegisterView`/`VerifyEmailView`. Emails go through `users/mailing.py::queue_mail` into `post_office` (DB-queued, priority `medium`, retries via `POST_OFFICE`; failures to queue are logged, never raised). Nothing is sent until `send_queued_mail` runs; `purge_mail` removes processed rows (they hold codes). Auth responses are uniform (no email enumeration): register with an existing email answers 201 like a new one and mails the owner (`account_exists` template). Every response carries `X-Request-ID`, included in log lines.
 - `utils/permissions.py::IsBusinessOrSuperAdmin` gates business/product endpoints — it checks membership in the Django **group named `business`** (users are auto-added to this group on register) or `is_superuser`.
 
 ### Multi-currency pricing
@@ -60,8 +65,17 @@ Both `ProductCategory` and `Product` carry the same promotion fields (`multibuy_
 
 ### File uploads / nested forms
 
-DRF is configured globally with `drf_nested_forms` parsers (`NestedMultiPartParser`, `NestedJSONParser`) before the standard `FormParser`. This lets multipart requests carry nested structures (e.g. a product plus its variants/media/addons and their image files in one request). Product write views use `ProductInputSerializer` for create/update and `ProductSerializer` for reads (`get_serializer_class` switches by action). Image uploads are validated by `business/validators.py` (≤2MB, jpg/jpeg/png/gif).
+DRF is configured globally with `drf_nested_forms` parsers (`NestedMultiPartParser`, `NestedJSONParser`) before the standard `FormParser`. This lets multipart requests carry nested structures (e.g. a product plus its variants/media/addons and their image files in one request). Product write views use `ProductInputSerializer` for create/update and `ProductSerializer` for reads (`get_serializer_class` switches by action). Image uploads are validated by `business/validators.py` (≤2MB, jpg/jpeg/png/gif). Product media/variant images are sniffed by magic bytes (`utils/uploads.py`, `products/validators.py`) and the stored Content-Type and `media_type` derive from the validated extension, never from the client. Nested lists per product are capped (`MAX_VARIANTS`/`MAX_ADDONS`/`MAX_MEDIA_ITEMS` = 20 rows; gallery 3 images + 1 video, computed over the final state). Files of deleted/replaced Product media, variants, 3D models and business profile images are removed after commit by `utils/storage_cleanup.py` (errors logged, files still referenced elsewhere are kept). R2 storage options live in `marky_backend/storage_config.py` (`AWS_S3_CUSTOM_DOMAIN` gives unsigned URLs).
+
+### Dependencies & container
+- Every line in `requirements.txt` is pinned with `==` (no ranges, no hashes). Local env is Python 3.10, the Dockerfile uses `python:3.11.18-slim-bookworm`: any new pin must support both. Pillow is held at 12.x because Pillow 13 requires Python >= 3.11.
+- DRF >= 3.18 auto-builds validators from single-field conditional `UniqueConstraint`s, which made `category` required on `ProductInputSerializer`; that serializer sets `Meta.validators = []` to keep the old behaviour (stopper conflicts are checked in `_stopper_conflict`). Re-check this when bumping DRF.
+- The image runs as non-root user `app` (uid 10001); `/app/media` and `/app/staticfiles` are owned by it. `collectstatic` at build time needs placeholder prod env vars (see Dockerfile) because settings fail closed with `DEBUG=False`.
+- CI (`.github/workflows/ci.yml`): ruff, `check`, `makemigrations --check --dry-run`, `test` (against a PostGIS service container: `Branch.location` is a geography field, so the suite does NOT run on SQLite), `pip-audit` (non-blocking while Pillow 13 advisories are open). `.github/dependabot.yml` ignores Pillow major bumps. Secret scan: `.gitleaks.toml` + `secret-scan.yml`.
+- Audit with `pip-audit` from a throwaway venv outside the project env (`pip-audit -r requirements.txt --no-deps --disable-pip`).
 
 ## API docs
+
+In production (`DEBUG=False`) the schema/Swagger/ReDoc URLs return 404 unless the visitor is a staff user logged in via `/admin/` (see `docs_gate` in `urls.py`). Probes: `/healthz` (process up, no DB) and `/readyz` (`SELECT 1`), both unauthenticated and unthrottled.
 
 Spectacular schema at `/api/schema/`, Swagger UI at `/api/schema/swagger/`, ReDoc at `/api/schema/redoc/`. Tag new endpoints with `@extend_schema(tags=[...])` using the existing tags (`Auth`, `Business`, `Cities`, `Products`).

@@ -9,7 +9,11 @@ class NumberInFilter(filters.BaseInFilter, filters.NumberFilter):
 
 
 def _promotion_active_q(now, prefix=''):
-    """Q object for 'has a direct, currently-active promotion', on the given model/relation prefix."""
+    """Q object for 'has a direct, currently-active promotion', on the given model/relation prefix.
+
+    Borde: inicio inclusivo (`starts <= now`), fin exclusivo (`ends > now`);
+    misma regla que `promotions.compute_promotion_status`.
+    """
     multibuy = f'{prefix}multibuy_option'
     discount = f'{prefix}discount_percentage'
     starts = f'{prefix}promotion_starts_at'
@@ -22,7 +26,7 @@ def _promotion_active_q(now, prefix=''):
     ) & (
         Q(**{f'{starts}__isnull': True}) | Q(**{f'{starts}__lte': now})
     ) & (
-        Q(**{f'{ends}__isnull': True}) | Q(**{f'{ends}__gte': now})
+        Q(**{f'{ends}__isnull': True}) | Q(**{f'{ends}__gt': now})
     )
 
 

@@ -1,3 +1,6 @@
+from decimal import Decimal
+
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 from utils.tests_base import MarkyAPITestCase
 from business.management.commands.seed import Command
@@ -117,6 +120,37 @@ class TestBusinessIdReservedWords(MarkyAPITestCase):
         self.assertEqual(response.status_code, 400)
         profile.refresh_from_db()
         self.assertEqual(profile.business_id, 'biz_reserved_rename')
+
+
+class AccountInfoEmailReadOnlyTests(MarkyAPITestCase):
+    """El email de la cuenta es de solo lectura: el PATCH ignora la clave
+    `email` (nunca cambia user.email ni username), pero el resto de campos
+    se siguen actualizando en la misma peticion."""
+
+    URL = '/api/v1/business/account-info/'
+
+    def test_patch_ignores_email_but_updates_other_fields(self):
+        user, _ = self.make_user('biz_email_ro', 'biz_email_ro@test.com')
+        original_username = user.username
+        client = self.auth_client(user)
+        response = client.patch(self.URL, {
+            'email': 'otro@test.com',
+            'phone_number': '+595981000111',
+            'business_name': 'Nuevo Nombre',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        user.refresh_from_db()
+        self.assertEqual(user.email, 'biz_email_ro@test.com')
+        self.assertEqual(user.username, original_username)
+        self.assertEqual(user.phone_number, '+595981000111')
+        self.assertEqual(user.business_name, 'Nuevo Nombre')
+        self.assertEqual(response.data['email'], 'biz_email_ro@test.com')
+
+    def test_get_still_returns_email(self):
+        user, _ = self.make_user('biz_email_get', 'biz_email_get@test.com')
+        response = self.auth_client(user).get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['email'], 'biz_email_get@test.com')
 
 
 class SocialMediaLinksReplaceTests(MarkyAPITestCase):
@@ -307,3 +341,211 @@ class TestSeedCurrencyNames(TestCase):
         self.assertEqual(Currency.objects.get(code='PYG').name, 'Guaraní Paraguayo')
         self.assertEqual(Currency.objects.get(code='VES').name, 'Bolívar Venezolano')
         self.assertEqual(Currency.objects.get(code='USD').name, 'Dólar Americano')
+
+
+class TestBusinessIdValidation(MarkyAPITestCase):
+    """F-08: create y update comparten un solo validador de business_id."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.owner, cls.owner_profile = cls.make_user('foo', 'foo@test.com')
+        cls.new_user, _ = cls.make_user('newbie', 'newbie@test.com', with_profile=False)
+        cls.other, cls.other_profile = cls.make_user('other-biz', 'other@test.com')
+
+    def _create(self, business_id):
+        return self.auth_client(self.new_user).post('/api/v1/business/business_profile/', {
+            'business_id': business_id,
+            'primary_currency': self.primary_currency.id,
+            'is_primary_to_secondary': True,
+        }, format='json')
+
+    def test_create_case_variant_of_existing_id_is_rejected(self):
+        response = self._create('FOO')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+        self.assertFalse(BusinessProfile.objects.filter(user=self.new_user).exists())
+
+    def test_create_lowercase_duplicate_is_rejected(self):
+        response = self._create('foo')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_create_with_illegal_character_is_rejected(self):
+        response = self._create('bad id!')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_create_with_three_characters_is_rejected(self):
+        response = self._create('abc')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_create_with_more_than_24_characters_is_rejected(self):
+        response = self._create('a' * 25)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_create_reserved_id_is_rejected(self):
+        response = self._create('home')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_create_valid_id_succeeds(self):
+        response = self._create('fresh-id')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(BusinessProfile.objects.get(user=self.new_user).business_id, 'fresh-id')
+
+    def test_put_update_case_variant_of_other_business_is_rejected(self):
+        response = self.auth_client(self.other).put(
+            f'/api/v1/business/business_profile/{self.other_profile.id}/',
+            {'business_id': 'FOO', 'primary_currency': self.primary_currency.id,
+             'is_primary_to_secondary': True},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_put_update_keeping_own_id_is_allowed(self):
+        response = self.auth_client(self.other).put(
+            f'/api/v1/business/business_profile/{self.other_profile.id}/',
+            {'business_id': 'other-biz', 'primary_currency': self.primary_currency.id,
+             'is_primary_to_secondary': True},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_account_info_patch_case_variant_is_rejected(self):
+        response = self.auth_client(self.other).patch(
+            '/api/v1/business/account-info/', {'business_id': 'foo'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('business_id', response.data)
+
+    def test_model_save_normalises_to_lowercase(self):
+        user, _ = self.make_user('tmpuser', 'tmp@test.com', with_profile=False)
+        profile = BusinessProfile.objects.create(
+            user=user, business_id='MixedCase', primary_currency=self.primary_currency)
+        profile.refresh_from_db()
+        self.assertEqual(profile.business_id, 'mixedcase')
+
+    def test_db_constraint_rejects_case_variant_duplicates(self):
+        # `update()` evita BusinessProfile.save(), así que prueba la restricción de la BD.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                BusinessProfile.objects.filter(pk=self.other_profile.pk).update(business_id='FOO')
+
+
+class TestAccountInfoSecondaryCurrency(MarkyAPITestCase):
+    """F-10 / F-35: desactivar la moneda secundaria y validar la tasa de cambio."""
+
+    URL = '/api/v1/business/account-info/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('fx_tenant', 'fx@test.com')
+
+    def setUp(self):
+        BusinessProfile.objects.filter(pk=self.profile.pk).update(
+            secondary_currency=self.secondary_currency, exchange_rate=Decimal('7500.00'))
+        self.client_ = self.auth_client(self.user)
+
+    def _patch(self, payload):
+        return self.client_.patch(self.URL, payload, format='json')
+
+    def test_disable_secondary_currency_with_null_rate(self):
+        response = self._patch({'secondary_currency': None, 'exchange_rate': None})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.secondary_currency)
+        self.assertIsNone(self.profile.exchange_rate)
+
+    def test_disable_secondary_currency_alone_clears_stale_rate(self):
+        response = self._patch({'secondary_currency': None})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.exchange_rate)
+
+    def test_no_secondary_currency_with_a_rate_is_rejected(self):
+        response = self._patch({'secondary_currency': None, 'exchange_rate': '5.00'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_secondary_currency_with_null_rate_is_rejected(self):
+        response = self._patch({'secondary_currency': self.secondary_currency.id, 'exchange_rate': None})
+        self.assertEqual(response.status_code, 400)
+
+    def test_secondary_currency_without_any_rate_is_rejected(self):
+        BusinessProfile.objects.filter(pk=self.profile.pk).update(
+            secondary_currency=None, exchange_rate=None)
+        response = self._patch({'secondary_currency': self.secondary_currency.id})
+        self.assertEqual(response.status_code, 400)
+
+    def test_zero_rate_is_rejected(self):
+        response = self._patch({'secondary_currency': self.secondary_currency.id, 'exchange_rate': '0'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('exchange_rate', response.data)
+
+    def test_negative_rate_is_rejected(self):
+        response = self._patch({'exchange_rate': '-3.50'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('exchange_rate', response.data)
+
+    def test_rate_without_secondary_currency_is_rejected(self):
+        BusinessProfile.objects.filter(pk=self.profile.pk).update(
+            secondary_currency=None, exchange_rate=None)
+        response = self._patch({'exchange_rate': '10.00'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_valid_secondary_currency_and_rate_succeeds(self):
+        response = self._patch({'secondary_currency': self.secondary_currency.id, 'exchange_rate': '7400.50'})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.exchange_rate, Decimal('7400.50'))
+
+    def test_unrelated_patch_keeps_existing_currency_config(self):
+        response = self._patch({'business_type': 'entrepreneur'})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.secondary_currency, self.secondary_currency)
+        self.assertEqual(self.profile.exchange_rate, Decimal('7500.00'))
+
+
+class TestBusinessProfileCreateValidation(MarkyAPITestCase):
+    """F-35 / F-38 en la creación del perfil."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user, cls.profile = cls.make_user('has_profile', 'hp@test.com')
+        cls.fresh, _ = cls.make_user('fresh_user', 'fresh@test.com', with_profile=False)
+
+    def _post(self, user, **extra):
+        payload = {'business_id': 'brand-new', 'primary_currency': self.primary_currency.id,
+                   'is_primary_to_secondary': True}
+        payload.update(extra)
+        return self.auth_client(user).post('/api/v1/business/business_profile/', payload, format='json')
+
+    def test_duplicate_profile_create_returns_400_not_500(self):
+        response = self._post(self.user)
+        self.assertEqual(response.status_code, 400)
+
+    def test_create_zero_rate_is_rejected(self):
+        response = self._post(self.fresh, secondary_currency=self.secondary_currency.id, exchange_rate='0')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('exchange_rate', response.data)
+
+    def test_create_negative_rate_is_rejected(self):
+        response = self._post(self.fresh, secondary_currency=self.secondary_currency.id, exchange_rate='-1')
+        self.assertEqual(response.status_code, 400)
+
+    def test_create_secondary_currency_requires_rate(self):
+        response = self._post(self.fresh, secondary_currency=self.secondary_currency.id)
+        self.assertEqual(response.status_code, 400)
+
+    def test_create_rate_without_secondary_currency_is_rejected(self):
+        response = self._post(self.fresh, exchange_rate='10.00')
+        self.assertEqual(response.status_code, 400)
+
+    def test_create_with_secondary_currency_and_rate_succeeds(self):
+        response = self._post(self.fresh, secondary_currency=self.secondary_currency.id, exchange_rate='7500')
+        self.assertEqual(response.status_code, 201, response.data)

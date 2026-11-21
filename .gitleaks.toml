@@ -1,0 +1,18 @@
+# Config de gitleaks: reglas por defecto + allowlist de placeholders conocidos.
+title = "marky_backend gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders y archivos de ejemplo (no son secretos reales)"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\.docker\.example$''',
+  '''(^|/)env/''',
+  '''(^|/)locale/''',
+]
+regexes = [
+  '''<[a-z_]+(_key|_pwd|_string_goes_here)?>''',
+  '''ci-only-not-a-secret''',
+]

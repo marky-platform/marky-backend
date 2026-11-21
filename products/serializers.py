@@ -6,13 +6,16 @@ from decimal import Decimal
 
 from . import product_extras
 from .models import Product, ProductCategory, ProductVariant, ProductAddon, ProductMedia, Product3DModel
-from .signals import delete_stored_files_on_commit
+from utils.uploads import file_extension, force_content_type, EXTENSION_TYPES
 from .validators import (
-    validate_media_extension, validate_media_size, validate_glb_file, validate_usdz_file,
+    validate_media_extension, validate_media_size, validate_media_content, validate_glb_file, validate_usdz_file,
+    validate_image_extension_only, validate_image_content,
 )
 from .promotions import (
     PROMOTION_TYPE_CONFLICT_MESSAGE,
+    PROMOTION_WINDOW_ORDER_MESSAGE,
     promotion_type_conflict,
+    promotion_window_is_invalid,
     resolve_effective_promotion,
     compute_promotion_status,
     ACTIVE as PROMOTION_ACTIVE,
@@ -176,7 +179,22 @@ class ProductPriceMixin:
 class ProductMediaSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductMedia
-        fields = ['id', 'file', 'media_type', 'order']
+        fields = ['id', 'file', 'thumbnail', 'media_type', 'order']
+
+
+# Límites de las listas anidadas de un producto (filas por request, incluidas
+# las marcadas `_delete`). La galería final se limita aparte (3 imágenes, 1 video).
+MAX_VARIANTS = 20
+MAX_ADDONS = 20
+MAX_MEDIA_ITEMS = 20
+MAX_GALLERY_IMAGES = 3
+MAX_GALLERY_VIDEOS = 1
+
+
+def _media_type_for_file(file):
+    """Tipo de media (image/video) derivado de la extensión ya validada del archivo."""
+    content_type = EXTENSION_TYPES[file_extension(file)][1]
+    return ProductMedia.VIDEO if content_type.startswith('video/') else ProductMedia.IMAGE
 
 
 class ProductMediaInputSerializer(serializers.ModelSerializer):
@@ -184,7 +202,7 @@ class ProductMediaInputSerializer(serializers.ModelSerializer):
     file = serializers.FileField(
         required=False,
         allow_null=True,
-        validators=[validate_media_extension, validate_media_size],
+        validators=[validate_media_extension, validate_media_size, validate_media_content],
     )
     _delete = serializers.BooleanField(required=False, default=False)
 
@@ -196,6 +214,20 @@ class ProductMediaInputSerializer(serializers.ModelSerializer):
         if "_delete" in data and isinstance(data["_delete"], str):
             data["_delete"] = data["_delete"].lower() in ("true", "1")
         return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        file = attrs.get('file')
+        if file:
+            # El tipo y el Content-Type guardados salen del archivo validado,
+            # nunca de lo que declare el cliente.
+            attrs['media_type'] = _media_type_for_file(file)
+            force_content_type(file)
+        else:
+            attrs.pop('media_type', None)
+            # Un elemento nuevo marcado `_delete` se ignora (create() lo omite): no exige archivo.
+            if not attrs.get('id') and not attrs.get('_delete'):
+                raise serializers.ValidationError({'file': 'El archivo es requerido para cada elemento nuevo de la galería.'})
+        return attrs
 
 
 class Product3DModelSerializer(serializers.ModelSerializer):
@@ -239,7 +271,10 @@ class DeletableNestedItemMixin:
                 flag = flag.strip().lower() in ('true', '1')
             item_id = data.get('id')
             if flag and item_id not in (None, ''):
-                return {'id': int(item_id), '_delete': True}
+                try:
+                    return {'id': int(item_id), '_delete': True}
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({'id': 'Un número entero válido es requerido.'})
         return super().to_internal_value(data)
 
 
@@ -271,7 +306,10 @@ class ProductVariantSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
 
 class ProductVariantInputSerializer(DeletableNestedItemMixin, serializers.ModelSerializer):
-    image = serializers.ImageField(required=False)
+    image = serializers.ImageField(
+        required=False,
+        validators=[validate_image_extension_only, validate_media_size, validate_image_content],
+    )
     id = serializers.IntegerField(required=False)
     _delete = serializers.BooleanField(required=False, default=False)
 
@@ -299,6 +337,16 @@ class ProductVariantInputSerializer(DeletableNestedItemMixin, serializers.ModelS
         return attrs
 
 
+def validate_category_promotion_window(attrs, instance):
+    """Inicio < fin para categorías, resuelto contra lo guardado en actualizaciones parciales."""
+    if 'promotion_starts_at' not in attrs and 'promotion_ends_at' not in attrs:
+        return
+    starts_at = attrs.get('promotion_starts_at', getattr(instance, 'promotion_starts_at', None))
+    ends_at = attrs.get('promotion_ends_at', getattr(instance, 'promotion_ends_at', None))
+    if promotion_window_is_invalid(starts_at, ends_at):
+        raise serializers.ValidationError({'promotion_ends_at': PROMOTION_WINDOW_ORDER_MESSAGE})
+
+
 class ProductCategoryLiteSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
@@ -322,6 +370,7 @@ class ProductCategoryBasicSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, attrs):
+        validate_category_promotion_window(attrs, self.instance)
         # One promotion type per row. Only evaluated when this request touches
         # a type field, so an unrelated save of a legacy row still goes through.
         if 'multibuy_option' in attrs or 'discount_percentage' in attrs:
@@ -392,6 +441,7 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     isFavorite = serializers.SerializerMethodField()
     isRecommended = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
+    image_thumbnail = serializers.SerializerMethodField()
     # Promotion fields: resolved (product-overrides-category, as one atomic
     # bundle) via resolve_effective_promotion — see _get_promotion_bundle.
     multibuy_option = serializers.SerializerMethodField()
@@ -407,7 +457,7 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ['id', 'name', 'slug', 'description', 'price', 'isFavorite', 'isRecommended', 'image',
+        fields = ['id', 'name', 'slug', 'description', 'price', 'isFavorite', 'isRecommended', 'image', 'image_thumbnail',
                   'multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at',
                   'promotion_status', 'is_available',
                   'primary_price', 'secondary_price',
@@ -489,14 +539,31 @@ class ProductLiteSerializer(ProductPriceMixin, serializers.ModelSerializer):
     def get_isRecommended(self, obj):
         return obj.stopper == 'RECOMMENDED'
 
-    def get_image(self, obj):
+    def _media_url(self, file):
         request = self.context.get('request')
-        media = obj.media.filter(media_type=ProductMedia.IMAGE).first()
-        if media and request:
-            return request.build_absolute_uri(media.file.url)
-        elif media:
-            return media.file.url
-        return None
+        return request.build_absolute_uri(file.url) if request else file.url
+
+    def _first_image(self, obj):
+        # Una sola consulta por producto para `image` e `image_thumbnail`.
+        if not hasattr(obj, '_first_image_media'):
+            # F-22: con `media` prefetcheado se filtra en Python (sin consultas extra); sin prefetch
+            # una sola consulta LIMIT 1 evita cargar todas las filas (incl. videos) por producto.
+            if 'media' in getattr(obj, '_prefetched_objects_cache', {}):
+                obj._first_image_media = next(
+                    (m for m in obj.media.all() if m.media_type == ProductMedia.IMAGE), None,
+                )
+            else:
+                obj._first_image_media = obj.media.filter(media_type=ProductMedia.IMAGE).first()
+        return obj._first_image_media
+
+    def get_image(self, obj):
+        media = self._first_image(obj)
+        return self._media_url(media.file) if media else None
+
+    def get_image_thumbnail(self, obj):
+        # Miniatura de la misma imagen que `image`; None si aún no existe (el cliente usa `image`).
+        media = self._first_image(obj)
+        return self._media_url(media.thumbnail) if media and media.thumbnail else None
 
     def get_multibuy_option(self, obj):
         bundle = self._get_promotion_bundle(obj)
@@ -540,6 +607,7 @@ class PromotionSerializer(serializers.ModelSerializer):
         fields = ['multibuy_option', 'discount_percentage', 'promotion_starts_at', 'promotion_ends_at']
 
     def validate(self, attrs):
+        validate_category_promotion_window(attrs, self.instance)
         # Same rule as ProductInputSerializer: a promotion window with no
         # discount/multibuy type configured is a no-op, so reject it when
         # this request is the one setting the dates.
@@ -594,9 +662,9 @@ class RawJSONField(serializers.JSONField):
 
 
 class ProductInputSerializer(serializers.ModelSerializer):
-    variants = ProductVariantInputSerializer(many=True, required=False)
-    addons = ProductAddonInputSerializer(many=True, required=False)
-    media = ProductMediaInputSerializer(many=True, required=False)
+    variants = ProductVariantInputSerializer(many=True, required=False, max_length=MAX_VARIANTS)
+    addons = ProductAddonInputSerializer(many=True, required=False, max_length=MAX_ADDONS)
+    media = ProductMediaInputSerializer(many=True, required=False, max_length=MAX_MEDIA_ITEMS)
     model_3d = Product3DModelInputSerializer(required=False, allow_null=True)
     description = serializers.CharField(max_length=300)
     category = serializers.PrimaryKeyRelatedField(
@@ -617,6 +685,12 @@ class ProductInputSerializer(serializers.ModelSerializer):
             'variants', 'addons', 'media', 'model_3d', 'is_available',
             'featured_ingredients', 'presentation', 'allergens', 'celiac_info',
         ]
+        # DRF >= 3.18 turns single-field *conditional* UniqueConstraints
+        # (unique_*_stopper_per_category) into UniqueTogetherValidators that
+        # force `category` to be required. It is optional here and the
+        # favorite/recommended stopper conflict is checked in _stopper_conflict,
+        # so keep the pre-3.18 behaviour of no auto-generated validators.
+        validators = []
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -738,9 +812,9 @@ class ProductInputSerializer(serializers.ModelSerializer):
         # (see products/promotions.py), so past end dates are valid.
         starts_at = attrs.get('promotion_starts_at', getattr(self.instance, 'promotion_starts_at', None))
         ends_at = attrs.get('promotion_ends_at', getattr(self.instance, 'promotion_ends_at', None))
-        if starts_at and ends_at and starts_at >= ends_at:
+        if promotion_window_is_invalid(starts_at, ends_at):
             raise serializers.ValidationError({
-                'promotion_ends_at': 'La fecha de fin debe ser posterior a la fecha de inicio.'
+                'promotion_ends_at': PROMOTION_WINDOW_ORDER_MESSAGE
             })
 
         # A promotion window (dates) with no actual discount/multibuy type is
@@ -803,22 +877,32 @@ class ProductInputSerializer(serializers.ModelSerializer):
         # check. Images and videos cap independently.
         media_data = attrs.get('media')
         if media_data is not None:
-            remaining_media = [item for item in media_data if not item.get('_delete')]
-            image_count = sum(
-                1 for item in remaining_media
-                if item.get('media_type', ProductMedia.IMAGE) == ProductMedia.IMAGE
-            )
-            video_count = sum(
-                1 for item in remaining_media
-                if item.get('media_type') == ProductMedia.VIDEO
-            )
-            if image_count > 3:
+            # La cuota se calcula sobre el estado final: las filas existentes que
+            # el payload no menciona se conservan (process_related no las borra),
+            # así que cuentan igual que las nuevas.
+            final_types = {}
+            if self.instance is not None:
+                final_types = {m.id: m.media_type for m in self.instance.media.all()}
+            new_types = []
+            for item in media_data:
+                item_id = item.get('id')
+                if item_id:
+                    if item_id not in final_types:
+                        continue  # id ajeno/inexistente: process_related lo ignora
+                    if item.get('_delete'):
+                        del final_types[item_id]
+                    elif item.get('media_type'):
+                        final_types[item_id] = item['media_type']
+                elif not item.get('_delete'):
+                    new_types.append(item.get('media_type', ProductMedia.IMAGE))
+            all_types = list(final_types.values()) + new_types
+            if all_types.count(ProductMedia.IMAGE) > MAX_GALLERY_IMAGES:
                 raise serializers.ValidationError({
-                    'media': 'No se pueden tener más de 3 imágenes en la galería.'
+                    'media': f'No se pueden tener más de {MAX_GALLERY_IMAGES} imágenes en la galería.'
                 })
-            if video_count > 1:
+            if all_types.count(ProductMedia.VIDEO) > MAX_GALLERY_VIDEOS:
                 raise serializers.ValidationError({
-                    'media': 'No se puede tener más de 1 video en la galería.'
+                    'media': f'No se puede tener más de {MAX_GALLERY_VIDEOS} video en la galería.'
                 })
 
         return attrs
@@ -857,8 +941,9 @@ class ProductInputSerializer(serializers.ModelSerializer):
             ProductAddon.objects.create(product=product, **addon_data)
 
         for media_item in media_data:
-            if '_delete' in media_item:
-                media_item.pop('_delete')
+            if media_item.get('_delete'):
+                continue  # en create no hay nada que borrar
+            media_item = {k: v for k, v in media_item.items() if k not in ('id', '_delete')}
             ProductMedia.objects.create(product=product, **media_item)
 
         self._apply_model_3d(product, model_3d_data)
@@ -890,7 +975,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
         if not (glb_file or usdz_file or remove_usdz):
             return
 
-        old_files = []
         if glb_file:
             glb_file.content_type = 'model/gltf-binary'
         if usdz_file:
@@ -900,11 +984,7 @@ class ProductInputSerializer(serializers.ModelSerializer):
             if not glb_file:
                 return  # validate() rejects a USDZ without a GLB; nothing to clear
             model = Product3DModel(product=product)
-        else:
-            if glb_file and model.glb_file:
-                old_files.append(model.glb_file.name)
-            if (usdz_file or remove_usdz) and model.usdz_file:
-                old_files.append(model.usdz_file.name)
+        # Los archivos reemplazados o quitados los borra storage_cleanup tras el commit.
 
         if glb_file:
             model.glb_file = glb_file
@@ -913,7 +993,6 @@ class ProductInputSerializer(serializers.ModelSerializer):
         elif remove_usdz:
             model.usdz_file = None
         model.save()
-        delete_stored_files_on_commit(model.glb_file.storage, old_files)
 
     @transaction.atomic
     def update(self, instance, validated_data):

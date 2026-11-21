@@ -3,6 +3,8 @@ import os
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 
+from utils.uploads import content_matches_extension
+
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp']
 VIDEO_EXTENSIONS = ['.mp4', '.mov', '.webm']
 
@@ -35,6 +37,29 @@ def validate_media_size(value):
             raise ValidationError(_("El video supera el peso máximo permitido. Máximo permitido: 80MB."))
     elif filesize > MAX_IMAGE_SIZE:
         raise ValidationError(_("La imagen supera el peso máximo permitido. Máximo permitido: 5MB."))
+
+
+def validate_media_content(value):
+    """
+    Valida que los magic bytes del archivo coincidan con su extensión
+    (el Content-Type del cliente no es confiable), p. ej. un HTML llamado x.mp4.
+    """
+    if not content_matches_extension(value, IMAGE_EXTENSIONS + VIDEO_EXTENSIONS):
+        raise ValidationError(_("El contenido del archivo no coincide con su extensión."))
+
+
+def validate_image_content(value):
+    """Igual que `validate_media_content` pero solo admite imágenes."""
+    if not content_matches_extension(value, IMAGE_EXTENSIONS):
+        raise ValidationError(_("El contenido del archivo no coincide con su extensión."))
+
+
+def validate_image_extension_only(value):
+    ext = os.path.splitext(value.name)[1].lower()
+    if ext not in IMAGE_EXTENSIONS:
+        raise ValidationError(_(
+            f"Extensión de archivo no válida: {ext}. Extensiones permitidas: {', '.join(IMAGE_EXTENSIONS)}."
+        ))
 
 
 MAX_MODEL_3D_SIZE = 25 * 1024 * 1024

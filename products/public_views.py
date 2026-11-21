@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from business.public_views import get_business_or_404
 from .catalog import build_catalog_payload, restrict_to_visible_categories
 from .models import Product
+from .pagination import AllResultsPagination
 from .serializers import ProductCategoryBasicSerializer, ProductCategoryWithProductsSerializer
 from .public_serializers import PublicProductSerializer
 from .slugs import UNCATEGORIZED_SLUG
@@ -42,6 +43,7 @@ class PublicCatalogView(generics.GenericAPIView):
     permission_classes = [AllowAny]
     throttle_scope = 'public'
     serializer_class = ProductCategoryWithProductsSerializer
+    pagination_class = AllResultsPagination  # F-28: sin truncar categorías
 
     def get(self, request, business_id, *args, **kwargs):
         business = get_business_or_404(business_id)
@@ -62,6 +64,7 @@ class PublicCategoryListView(generics.ListAPIView):
     permission_classes = [AllowAny]
     throttle_scope = 'public'
     serializer_class = ProductCategoryBasicSerializer
+    pagination_class = AllResultsPagination  # F-28: sin truncar categorías
 
     def get_queryset(self):
         business = get_business_or_404(self.kwargs['business_id'])

@@ -91,7 +91,7 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
     # `product_queryset` is set this also scopes them the same way
     # (e.g. is_active=True) rather than every product in the category.
     filtered_qs = filtered_qs.prefetch_related(
-        models.Prefetch('products', queryset=final_products)
+        models.Prefetch('products', queryset=final_products.prefetch_related('media'))
     )
     products_count = final_products.filter(category__in=category_filter.qs).count()
 
@@ -99,7 +99,7 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
     # ProductCategory row for them), so products_count must account for them
     # separately or a business whose only products are uncategorized would be
     # reported as having zero products.
-    products_without_category = final_products.filter(category__isnull=True)
+    products_without_category = final_products.filter(category__isnull=True).prefetch_related('media')
     products_count += products_without_category.count()
 
     # Opt-in (`include_counts=true`) so default responses keep their shape.
@@ -149,6 +149,10 @@ def build_catalog_payload(*, business, request, query_params, paginator=None,
             serialized_data = _serialize(page)
             paginated_response = paginator.get_paginated_response(serialized_data)
             result = paginated_response.data
+            if products_without_category.exists():
+                # El grupo sintético "Sin categoría" se añade a results: `count`
+                # debe contarlo para que coincida con len(results).
+                result['count'] += 1
             result['products_count'] = products_count
             if filter_counts is not None:
                 result['filter_counts'] = filter_counts

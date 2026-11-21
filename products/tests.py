@@ -35,6 +35,9 @@ from products.promotions import (
 
 User = get_user_model()
 
+# Cabecera JPEG mínima: la validación por magic bytes exige contenido real.
+_JPEG_HEADER = b'\xff\xd8\xff\xe0'
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — no database, test model methods in isolation
@@ -607,6 +610,58 @@ class TestProductCategoryTenancy(MarkyAPITestCase):
         self.assertEqual(response.status_code, 404)
 
 
+class TestProductCategoryOrderUpdate(MarkyAPITestCase):
+    URL = '/api/v1/products/product-categories/update_order/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.user_a, cls.profile_a = cls.make_user('category_order_a', 'category_order_a@test.com')
+        cls.user_b, cls.profile_b = cls.make_user('category_order_b', 'category_order_b@test.com')
+        cls.cat_a_one = ProductCategory.objects.create(
+            business=cls.profile_a, name='A uno', icon='icon', order=1,
+        )
+        cls.cat_a_two = ProductCategory.objects.create(
+            business=cls.profile_a, name='A dos', icon='icon', order=2,
+        )
+        cls.cat_b = ProductCategory.objects.create(
+            business=cls.profile_b, name='B uno', icon='icon', order=7,
+        )
+
+    def _post(self, data):
+        return self.auth_client(self.user_a).post(self.URL, data, format='json')
+
+    def test_rejects_category_from_another_tenant_without_changing_it(self):
+        response = self._post({'categories': [{'id': self.cat_b.id, 'order': 1}]})
+
+        self.assertEqual(response.status_code, 400)
+        self.cat_b.refresh_from_db()
+        self.assertEqual(self.cat_b.order, 7)
+
+    def test_rejects_malformed_payloads(self):
+        for payload in (
+            {'categories': {'id': self.cat_a_one.id, 'order': 1}},
+            {'categories': [{'id': self.cat_a_one.id}]},
+            {'categories': [{'id': self.cat_a_one.id, 'order': 1}, {'id': self.cat_a_one.id, 'order': 2}]},
+        ):
+            with self.subTest(payload=payload):
+                response = self._post(payload)
+                self.assertEqual(response.status_code, 400)
+
+    def test_reorders_own_categories(self):
+        response = self._post({
+            'categories': [
+                {'id': self.cat_a_one.id, 'order': 2},
+                {'id': self.cat_a_two.id, 'order': 1},
+            ],
+        })
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.cat_a_one.refresh_from_db()
+        self.cat_a_two.refresh_from_db()
+        self.assertEqual((self.cat_a_one.order, self.cat_a_two.order), (2, 1))
+
+
 class TestProductInputSerializerTenancy(MarkyAPITestCase):
 
     @classmethod
@@ -877,7 +932,7 @@ class TestProductMediaUploadAPI(MarkyAPITestCase):
 
     def test_valid_image_accepted_by_api(self):
         client = self.auth_client(self.user)
-        good_file = SimpleUploadedFile('photo.jpg', b'x' * 1024, content_type='image/jpeg')
+        good_file = SimpleUploadedFile('photo.jpg', _JPEG_HEADER + b'x' * 1024, content_type='image/jpeg')
         response = client.post(
             '/api/v1/products/products/', self._create_payload(good_file), format='multipart',
         )
@@ -2075,7 +2130,7 @@ class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
         self.assertIn(self.user, notification.recipients.all())
 
     def test_product_name_truncated_at_20_chars_in_notification(self):
-        product = self._expired_product(name='A Very Long Product Name That Exceeds The Limit')
+        self._expired_product(name='A Very Long Product Name That Exceeds The Limit')
         client = self.auth_client(self.user)
 
         client.get('/api/v1/products/products/')
@@ -2183,7 +2238,7 @@ class TestExpiredPromotionAutoDeactivation(MarkyAPITestCase):
         self.assertEqual(Notification.objects.count(), 0)
 
     def test_no_promo_configured_untouched(self):
-        product = Product.objects.create(
+        Product.objects.create(
             name='Plain Product', description='Desc', price=Decimal('10.00'),
             business=self.profile,
         )
@@ -3635,7 +3690,7 @@ class TestProductModel3DAPI(MarkyAPITestCase):
         self.assertIsNone(response.data['model_3d']['usdz_file'])
 
     def test_stored_content_types_are_normalized(self):
-        response = self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()})
+        self._create(**{'model_3d[glb_file]': _glb(), 'model_3d[usdz_file]': _usdz()})
         product = Product.objects.get(name='Con 3D')
         # FileSystemStorage ignores content type, so assert on what the upload carried.
         with mock.patch('django.core.files.storage.FileSystemStorage.save', autospec=True) as save:
@@ -3760,7 +3815,7 @@ class TestProductModel3DAPI(MarkyAPITestCase):
     def test_media_limits_unchanged_with_model(self):
         data = self._base(**{'model_3d[glb_file]': _glb()})
         for i in range(4):
-            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', b'x' * 16, content_type='image/jpeg')
+            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', _JPEG_HEADER + b'x' * 16, content_type='image/jpeg')
             data[f'media[{i}][media_type]'] = 'image'
             data[f'media[{i}][order]'] = str(i)
         response = self.client_a.post(self.URL, data, format='multipart')
@@ -3769,10 +3824,39 @@ class TestProductModel3DAPI(MarkyAPITestCase):
 
         data = self._base(**{'model_3d[glb_file]': _glb()})
         for i in range(3):
-            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', b'x' * 16, content_type='image/jpeg')
+            data[f'media[{i}][file]'] = SimpleUploadedFile(f'p{i}.jpg', _JPEG_HEADER + b'x' * 16, content_type='image/jpeg')
             data[f'media[{i}][media_type]'] = 'image'
             data[f'media[{i}][order]'] = str(i)
         response = self.client_a.post(self.URL, data, format='multipart')
         self.assertEqual(response.status_code, 201, response.content)
         self.assertEqual(len(response.data['media']), 3)
         self.assertIsNotNone(response.data['model_3d'])
+
+
+class TestMinor500s(MarkyAPITestCase):
+    """F-38: with_products sin perfil y tombstones con id no numérico deben dar 4xx, no 500."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.no_profile_user, _ = cls.make_user('noprofile', 'noprofile@test.com', with_profile=False)
+        cls.user, cls.profile = cls.make_user('tomb_tenant', 'tomb@test.com')
+
+    def test_with_products_without_profile_returns_empty_not_500(self):
+        client = self.auth_client(self.no_profile_user)
+        response = client.get('/api/v1/products/product-categories/with_products/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['results'], [])
+
+    def test_tombstone_with_non_numeric_id_returns_400(self):
+        client = self.auth_client(self.user)
+        product = Product.objects.create(
+            name='Existing Product', description='Desc', price=Decimal('10.00'), business=self.profile,
+        )
+        for prefix in ('addons', 'variants'):
+            response = client.patch(
+                f'/api/v1/products/products/{product.id}/',
+                {f'{prefix}[0][id]': 'abc', f'{prefix}[0][_delete]': 'true'},
+                format='multipart',
+            )
+            self.assertEqual(response.status_code, 400, prefix)
