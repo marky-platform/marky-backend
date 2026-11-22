@@ -1,0 +1,79 @@
+name: Promote to production
+
+# One-click promotion: fast-forwards `main` to the exact `develop` commit that QA tested.
+# Railway / Vercel deploy production from `main`. Promote the backend before the frontend.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # push to main
+  actions: read # read CI results for the develop commit
+
+concurrency:
+  group: promote-to-production
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote develop to main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Resolve commits
+        id: refs
+        run: |
+          git fetch origin main
+          echo "sha=$(git rev-parse origin/develop)" >> "$GITHUB_OUTPUT"
+          echo "main=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Require green CI and secret scan on the develop commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.refs.outputs.sha }}
+        run: |
+          failed=0
+          for wf in ci.yml secret-scan.yml; do
+            result=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/runs?head_sha=$SHA&event=push&branch=develop&per_page=1" \
+              --jq '.workflow_runs[0] | "\(.status) \(.conclusion)"')
+            echo "$wf on $SHA: $result"
+            if [ "$result" != "completed success" ]; then failed=1; fi
+          done
+          if [ "$failed" = 1 ]; then
+            echo "::error::develop commit $SHA has no successful CI/secret-scan run (push to develop). Not promoting."
+            exit 1
+          fi
+
+      - name: Require fast-forward (main must be an ancestor of develop)
+        env:
+          SHA: ${{ steps.refs.outputs.sha }}
+          MAIN: ${{ steps.refs.outputs.main }}
+        run: |
+          if [ "$SHA" = "$MAIN" ]; then
+            echo "main is already at $SHA. Nothing to promote."
+            echo "nothing=1" >> "$GITHUB_ENV"
+          elif ! git merge-base --is-ancestor "$MAIN" "$SHA"; then
+            echo "::error::main ($MAIN) has commits that develop ($SHA) does not. Fix that manually; this workflow never force-pushes."
+            exit 1
+          fi
+
+      - name: Fast-forward main
+        if: env.nothing != '1'
+        env:
+          SHA: ${{ steps.refs.outputs.sha }}
+          MAIN: ${{ steps.refs.outputs.main }}
+        run: |
+          # Plain (non-force) push: GitHub rejects it unless it is a fast-forward.
+          git push origin "$SHA:refs/heads/main"
+          {
+            echo "### Promoted to production"
+            echo ""
+            echo "main: \`$MAIN\` → \`$SHA\`"
+            echo ""
+            echo "Commits:"
+            git log --oneline "$MAIN..$SHA" | head -50 | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
