@@ -32,7 +32,9 @@ Never commit real values. The app refuses to start with `DEBUG=False` if a requi
 | `AWS_STORAGE_BUCKET_NAME` | yes | yes | One R2 bucket per env |
 | `AWS_S3_ENDPOINT_URL` | yes | account-wide | R2 endpoint |
 | `NUM_PROXIES` | yes | no | `1` on Railway (client IP for throttling) |
-| `SENTRY_DSN` | recommended | yes | One Sentry project/DSN per env |
+| `SENTRY_DSN` | recommended | no | DSN of the `marky-server` Sentry project (shared by QA and Production; events split by `SENTRY_ENVIRONMENT`). Unset = Sentry off |
+| `SENTRY_ENVIRONMENT` | with `SENTRY_DSN` | yes | `qa` or `production`. Set explicitly: Railway's env name is not used |
+| `SENTRY_TRACES_SAMPLE_RATE` | optional | maybe | Default `0.1` (free-plan quota); healthchecks are never traced. Release is taken from `RAILWAY_GIT_COMMIT_SHA` automatically |
 | `VERCEL_TEAM_SLUG` | optional | no | Allows Vercel preview origins in CORS |
 
 Vercel side: `REACT_APP_API_URL` must point to the matching backend (`https://<HOST>/api/v1`).

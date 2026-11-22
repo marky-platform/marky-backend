@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 from datetime import timedelta
 from pathlib import Path
 import environ
+import logging
 import os
 import re
 
@@ -43,9 +44,32 @@ if SENTRY_DSN:
     import sentry_sdk
     from sentry_sdk.integrations.django import DjangoIntegration
 
+    from sentry_sdk.integrations.logging import LoggingIntegration
+
+    # Tasa de trazas: 1.0 en local para poder verificar; en QA/producción, baja (cuota del plan gratuito).
+    SENTRY_TRACES_SAMPLE_RATE = env.float('SENTRY_TRACES_SAMPLE_RATE', default=1.0 if DEBUG else 0.1)
+
+    def _sentry_traces_sampler(sampling_context):
+        # Los healthchecks de Railway no aportan nada y consumirían la cuota de trazas.
+        path = (sampling_context.get('wsgi_environ') or {}).get('PATH_INFO', '')
+        if path.rstrip('/') in ('/healthz', '/readyz'):
+            return 0.0
+        return SENTRY_TRACES_SAMPLE_RATE
+
     sentry_sdk.init(
         dsn=SENTRY_DSN,
-        integrations=[DjangoIntegration()],
+        # Explícito (qa | production): el nombre del entorno de Railway no es fiable para esto.
+        environment=env.str('SENTRY_ENVIRONMENT', default='') or ('development' if DEBUG else 'unknown'),
+        # Release = SHA del commit; el mismo SHA pasa de QA a producción.
+        release=env.str('SENTRY_RELEASE', default='') or os.environ.get('RAILWAY_GIT_COMMIT_SHA') or None,
+        integrations=[
+            DjangoIntegration(),
+            # Logs a Sentry solo desde WARNING para no gastar cuota con INFO.
+            LoggingIntegration(sentry_logs_level=logging.WARNING),
+        ],
+        traces_sampler=_sentry_traces_sampler,
+        enable_logs=True,
+        # Sin PII: los flujos de auth llevan emails y códigos de verificación.
         send_default_pii=False,
     )
 
